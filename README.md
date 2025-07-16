@@ -25,10 +25,8 @@
 ✅ **自動化安裝**
 - 一鍵安裝 Docker 與 Docker Compose
 - 檢測並跳過已安裝項目
-- 支援 Debian / Ubuntu、CentOS、Alpine
 
 ✅ **通用介面**
-- 所有操作都提供中文介面
 - 支援編號操作，適合懶人快速選擇
 
 ---
@@ -36,9 +34,7 @@
 ## 📦 系統需求
 
 - Linux 系統 (Debian / Ubuntu / CentOS / Alpine)
-- Bash shell 環境
 - Docker (若未安裝，腳本可自動安裝)
-- `jq` 工具 (部分函式需要)
 
 ---
 
