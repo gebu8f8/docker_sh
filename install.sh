@@ -16,7 +16,7 @@ install_path="/usr/local/bin/docker_mgr"
 run_cmd="docker_mgr"
 
 echo "正在下載腳本..."
-wget -qO "$install_path" https://gitlab.com/gebu8f/sh/-/raw/main/docker/docker_mgr.sh || {
+wget -qO "$install_path" https://raw.githubusercontent.com/gebu8f8/docker_sh/refs/heads/main/docker_mgr.sh || {
   echo "下載失敗，請檢查網址或網路狀態。"
   exit 1
 }
