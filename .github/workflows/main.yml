@@ -29,13 +29,13 @@ jobs:
                echo "本次 push 有修改 docker_mgr.sh"
               else
                 echo "changed_ngsh=false" >> $GITHUB_ENV
-                echo "本次 push 未修改 ng.sh，後續流程將跳過"
+                echo "本次 push 未修改 docker_mgr.sh，後續流程將跳過"
               fi
              else
                 # 若 repo 僅有一個 commit
                if git ls-tree --name-only HEAD | grep -q '^ng\.sh$'; then
                  echo "changed_ngsh=true" >> $GITHUB_ENV
-                 echo "首次 commit 包含 ng.sh"
+                 echo "首次 commit 包含 docker_mgr.sh"
                else
                 echo "changed_ngsh=false" >> $GITHUB_ENV
                 echo "首次 commit 未包含 docker_mgr.sh，後續流程將跳過"
