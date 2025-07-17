@@ -39,6 +39,7 @@
 ---
 
 ## 🚀 安裝方式
-暫無
-
+```
+bash <(curl -sL https://raw.githubusercontent.com/gebu8f8/docker_sh/refs/heads/main/install.sh)
+```
 備註：本README是由ai自動生成，我有改一些不太好的地方
