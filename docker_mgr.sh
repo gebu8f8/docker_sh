@@ -10,7 +10,7 @@ BOLD_CYAN="\033[1;36;1m"
 RESET="\033[0m"
 
 #版本
-version="1.3.0"
+version="1.4.0"
 
 #檢查系統版本
 check_system(){
@@ -661,6 +661,49 @@ docker_volume_manager() {
             echo "❌ 無效的選擇"
             ;;
     esac
+}
+
+debug_container() {
+  echo -e "${YELLOW}===== Docker 調試容器 =====${RESET}"
+
+  containers=($(docker ps --format '{{.ID}} {{.Names}}'))
+  count=${#containers[@]}
+
+  if [ "$count" -eq 0 ]; then
+    echo -e "${RED}❌ 沒有正在運行的容器。${RESET}"
+    return 1
+  fi
+
+  echo "請選擇要進入的容器："
+  for ((i=0; i<count; i+=2)); do
+    index=$((i/2+1))
+    echo "  [$index] ${containers[i+1]} (${containers[i]})"
+  done
+
+  read -p "輸入編號：" choice
+
+  if ! [[ "$choice" =~ ^[0-9]+$ ]] || [ "$choice" -lt 1 ] || [ "$choice" -gt $((count/2)) ]; then
+    echo -e "${RED}⚠️ 無效的編號。${RESET}"
+    return 1
+  fi
+
+  cid="${containers[$(( (choice-1)*2 ))]}"
+  cname="${containers[$(( (choice-1)*2 + 1 ))]}"
+
+  echo -e "${CYAN}🔍 嘗試使用 bash 進入容器：$cname${RESET}"
+  if docker exec "$cid" which bash >/dev/null 2>&1; then
+    docker exec -it "$cid" bash
+    return 0
+  fi
+
+  echo -e "${YELLOW}❗ bash 不存在，改用 sh 嘗試進入容器：$cname${RESET}"
+  if docker exec "$cid" which sh >/dev/null 2>&1; then
+    docker exec -it "$cid" sh
+    return 0
+  fi
+
+  echo -e "${RED}❌ 無法進入容器 $cname：bash 和 sh 都無法使用。${RESET}"
+  return 1
 }
 
 
@@ -1436,24 +1479,27 @@ update_script() {
 
 show_menu(){
   show_docker_containers
-  echo "-------------------"
-  echo "Docker管理"
+  echo -e "${CYAN}-------------------${RESET}"
+  echo -e "${YELLOW}Docker 管理選單${RESET}"
   echo ""
-  echo "1. 啟動容器     2. 刪除容器"
+
+  echo -e "${GREEN}1.${RESET} 啟動容器     ${GREEN}2.${RESET} 刪除容器"
   echo ""
-  echo "3. 停止容器"
+  echo -e "${GREEN}3.${RESET} 停止容器"
   echo ""
-  echo "4. 重啟容器     5. 修改容器重啟策略"
+  echo -e "${GREEN}4.${RESET} 重啟容器     ${GREEN}5.${RESET} 修改容器重啟策略"
   echo ""
-  echo "6. docker網路管理    7. docker詳細佔用管理"
+  echo -e "${GREEN}6.${RESET} Docker 網路管理    ${GREEN}7.${RESET} Docker 詳細佔用管理"
   echo ""
-  echo "8. 查看docker存儲卷   9. 清除未使用的容器或網路"
+  echo -e "${GREEN}8.${RESET} 查看 Docker 存儲卷   ${GREEN}9.${RESET} 清除未使用的容器或網路"
   echo ""
-  echo "10. 推薦容器          11. Docker容器日誌讀取"
+  echo -e "${GREEN}10.${RESET} 推薦容器            ${GREEN}11.${RESET} Docker 容器日誌讀取"
   echo ""
-  echo "u. 更新腳本           0. 離開"
-  echo "-------------------"
-  echo -n -e "\033[1;33m請選擇操作 [1-10 / u 0]: \033[0m"
+  echo -e "${GREEN}12.${RESET} 調試 Docker 容器"
+  echo ""
+  echo -e "${BLUE}u.${RESET} 更新腳本             ${RED}0.${RESET} 離開"
+  echo -e "${CYAN}-------------------${RESET}"
+  echo -en "${YELLOW}請選擇操作 [1-12 / u 0]: ${RESET}"
 }
 case "$1" in
   --version|-V)
@@ -1513,6 +1559,10 @@ while true; do
     ;;
   11)
     docker_show_logs
+    read -p "操作完成，請按任意鍵繼續..." -n1 
+    ;;
+  12)
+    debug_container
     read -p "操作完成，請按任意鍵繼續..." -n1 
     ;;
   0)
