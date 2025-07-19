@@ -11,7 +11,7 @@ GRAY="\033[0;90m"
 RESET="\033[0m"
 
 #版本
-version="2.1.0"
+version="2.1.1"
 
 #檢查是否root權限
 if [ "$(id -u)" -ne 0 ]; then
@@ -1637,6 +1637,13 @@ uninstall_docker_app(){
   echo -e "${YELLOW}⚠️ 即將移除容器 $app_name${RESET}"
   docker stop "$app_name"
   docker rm "$app_name"
+  case $app_name in
+  Aria2Ng)
+    docker stop aria2
+    docker rm aria2
+    rm -rf /srv/docker/aria2
+    ;;
+  esac
   echo -e "${GREEN}✅ 已移除容器 $app_name。${RESET}"
   read -p "是否移除該容器存放資料夾?(Y/n)" confrim
   confrim=${confrim,,}
