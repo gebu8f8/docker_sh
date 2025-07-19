@@ -11,7 +11,7 @@ GRAY='\033[0;90m'
 RESET="\033[0m"
 
 #版本
-version="2.0.1"
+version="2.0.2"
 
 if [ "$(id -u)" -ne 0 ]; then
   echo "此腳本需要root權限運行" 
