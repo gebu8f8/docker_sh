@@ -7,10 +7,20 @@ YELLOW="\033[1;33m"
 CYAN="\033[1;36m"
 RED="\033[1;31m"
 BOLD_CYAN="\033[1;36;1m"
+GRAY='\033[0;90m'
 RESET="\033[0m"
 
 #版本
-version="1.4.0"
+version="2.0.0"
+
+if [ "$(id -u)" -ne 0 ]; then
+  echo "此腳本需要root權限運行" 
+  if command -v sudo >/dev/null 2>&1; then
+    exec sudo "$0" "$@"
+  else
+    echo "無sudo指令"
+  fi
+fi
 
 #檢查系統版本
 check_system(){
@@ -708,82 +718,295 @@ debug_container() {
 
 
 install_docker_app() {
-    local app_name="$1"
-    echo -e "${CYAN}🔧 安裝 $app_name${RESET}"
+  local app_name="$1"
+  local ipv4=$(curl -s --connect-timeout 3 https://api64.ipify.org)
+  local ipv6=$(curl -s -6 --connect-timeout 3 https://api64.ipify.org)
+  Tips(){
+    echo -e "${RED}⚠️ 這是唯一的顯示機會！${RESET}"
+    echo -e "${CYAN}📛 密碼/令牌不會儲存、不會記錄、不會再次出現。${RESET}"
+    echo
+    echo -e "${GRAY}我從不記錄日誌，也不保存密碼。${RESET}"
+    echo -e "${GRAY}本腳本不產生日誌檔、不會留下任何痕跡。${RESET}"
+    echo -e "${GRAY}你看過一次，就沒第二次。真的丟了，我也沒轍。${RESET}"
+  }
+  ips(){
+    local host_port=$1
+    local proto=${2:-http}
+    if [ $proto == https ]; then
+      [ -n "$ipv4" ] && echo -e "  🌐 IPv4：${BLUE}https://${ipv4}:${host_port}${RESET}"
+      [ -n "$ipv6" ] && echo -e "  🌐 IPv6：${BLUE}https://[${ipv6}]:${host_port}${RESET}"
+      return 0
+    fi
+    [ -n "$ipv4" ] && echo -e "  🌐 IPv4：${BLUE}http://${ipv4}:${host_port}${RESET}"
+    [ -n "$ipv6" ] && echo -e "  🌐 IPv6：${BLUE}http://[${ipv6}]:${host_port}${RESET}"
+  }
+  echo -e "${CYAN}🔧 安裝 $app_name${RESET}"
+  local host_port
+  while true; do
+    read -p "請輸入欲綁定的主機端口 (留空將從 10000-65535 中隨機選擇一個未被佔用的端口): " custom_port
 
-    local host_port
-    while true; do
-        read -p "請輸入欲綁定的主機端口 (留空將從 10000-65535 中隨機選擇一個未被佔用的端口): " custom_port
-
-        if [ -z "$custom_port" ]; then
-            echo "🔄 正在尋找可用的隨機端口..."
-            while true; do
-                host_port=$(shuf -i 10000-65535 -n 1)
-                if ! ss -tln | grep -q ":$host_port "; then
-                    echo "✅ 找到可用端口: $host_port"
-                    break
-                fi
-            done
-            break
-        else
-            if [[ "$custom_port" =~ ^[0-9]+$ ]] && [ "$custom_port" -ge 1 ] && [ "$custom_port" -le 65535 ]; then
-                if ss -tln | grep -q ":$custom_port "; then
-                    echo -e "${RED}❌ 端口 $custom_port 已被佔用，請重新輸入。${RESET}"
-                else
-                    host_port=$custom_port
-                    echo "✅ 端口 $host_port 可用。"
-                    break
-                fi
-            else
-                echo -e "${RED}❌ 無效的端口號，請輸入 1-65535 之間的數字。${RESET}"
+    if [ -z "$custom_port" ]; then
+        echo "🔄 正在尋找可用的隨機端口..."
+        while true; do
+            host_port=$(shuf -i 10000-65535 -n 1)
+            if ! ss -tln | grep -q ":$host_port "; then
+                echo "✅ 找到可用端口: $host_port"
+                  break
             fi
+        done
+        break
+    else
+        if [[ "$custom_port" =~ ^[0-9]+$ ]] && [ "$custom_port" -ge 1 ] && [ "$custom_port" -le 65535 ]; then
+            if ss -tln | grep -q ":$custom_port "; then
+                  echo -e "${RED}❌ 端口 $custom_port 已被佔用，請重新輸入。${RESET}"
+            else
+                host_port=$custom_port
+                echo "✅ 端口 $host_port 可用。"
+                break
+            fi
+        else
+            echo -e "${RED}❌ 無效的端口號，請輸入 1-65535 之間的數字。${RESET}"
         fi
-    done
-        mkdir -p /srv/docker
-        case $app_name in
-        bitwarden)
-        if ! command -v site >/dev/null 2>&1; then
-            echo "您好,您尚未安裝站點管理器,請先安裝"
-            read "操作完成,請按任意鍵繼續..." -n1
-            return 1
-        fi
-        read -p "請注意!bitwarden須強制https認證,需要綁定網址,是否繼續?(Y/n)" confirm
-        confirm=${confirm,,}
-        if ! [[ "$confirm" == y || "$confirm" == "" ]]; then
-            echo "已取消安裝。"
-        fi
-        read -p "請輸入網址：" domain
-        local admin_token=$(openssl rand -base64 48)
-        mkdir -p /srv/docker/bitwarden
-        docker run -d \
-            --name bitwarden \
-            --restart always \
-            -v "/srv/docker/bitwarden/data:/data" \
-            -p $host_port:80 \
-            -e DOMAIN=https://$domain \
-            -e LOGIN_RATELIMIT_MAX_BURST=10 \
-            -e LOGIN_RATELIMIT_SECONDS=60 \
-            -e ADMIN_RATELIMIT_MAX_BURST=10 \
-            -e ADMIN_RATELIMIT_SECONDS=60 \
-            -e ADMIN_SESSION_LIFETIME=20 \
-            -e ADMIN_TOKEN=$admin_token \
-            -e SENDS_ALLOWED=true \
-            -e EMERGENCY_ACCESS_ALLOWED=true \
-            -e WEB_VAULT_ENABLED=true \
-            -e SIGNUPS_ALLOWED=true \
-            vaultwarden/server:latest
-        site setup $domain proxy 127.0.0.1 http $host_port || {
-            echo "站點搭建失敗"
-            return 1
-        }
-        echo "===== bitwarden 密碼管理器資訊 ====="
-        echo "網址：https://$domain"
-        echo "admin token： $admin_token"
-        echo "請妥善保存您的admin token，本腳本不保存。"
+    fi
+  done
+  mkdir -p /srv/docker
+  case $app_name in
+  bitwarden)
+    if ! command -v site >/dev/null 2>&1; then
+      echo "您好,您尚未安裝站點管理器,請先安裝"
+      read "操作完成,請按任意鍵繼續..." -n1
+      return 1
+    fi
+    read -p "請注意!bitwarden須強制https認證,需要綁定網址,是否繼續?(Y/n)" confirm
+    confirm=${confirm,,}
+    if ! [[ "$confirm" == y || "$confirm" == "" ]]; then
+      echo "已取消安裝。"
+    fi
+    read -p "請輸入網址：" domain
+    local admin_token=$(openssl rand -base64 48)
+    mkdir -p /srv/docker/bitwarden
+    docker run -d \
+      --name bitwarden \
+      --restart always \
+      -v "/srv/docker/bitwarden:/data" \
+      -p $host_port:80 \
+      -e DOMAIN=https://$domain \
+      -e LOGIN_RATELIMIT_MAX_BURST=10 \
+      -e LOGIN_RATELIMIT_SECONDS=60 \
+      -e ADMIN_RATELIMIT_MAX_BURST=10 \
+      -e ADMIN_RATELIMIT_SECONDS=60 \
+      -e ADMIN_SESSION_LIFETIME=20 \
+      -e ADMIN_TOKEN=$admin_token \
+      -e SENDS_ALLOWED=true \
+      -e EMERGENCY_ACCESS_ALLOWED=true \
+      -e WEB_VAULT_ENABLED=true \
+      -e SIGNUPS_ALLOWED=true \
+      vaultwarden/server:latest
+    site setup $domain proxy 127.0.0.1 http $host_port || {
+      echo "站點搭建失敗"
+      return 1
+    }
+    echo "===== bitwarden 密碼管理器資訊 ====="
+    echo "網址：https://$domain"
+    echo "admin token： $admin_token"
+    Tips
+    read -p "操作完成，請按任意鍵繼續" -n1
+    ;;
+  portainer)
+    mkdir -p /srv/docker/portainer
+    docker run -d \
+      -p $host_port:9443 \
+      --name portainer \
+      --restart=always \
+      -v /var/run/docker.sock:/var/run/docker.sock \
+      -v /srv/docker/portainer:/data \
+      portainer/portainer-ce:latest 
+    read -p "是否需要反向代理？（Y/n）" confirm
+    confirm=${confirm,,}
+    if [[ "$confirm" == y || "$confirm" == "" ]]; then
+      if ! command -v site >/dev/null 2>&1; then
+        echo "您好，您尚未安裝站點管理器。"
         read -p "操作完成，請按任意鍵繼續" -n1
-        ;;
-        esac
-        echo -e "${GREEN}✅ $app_name 已成功安裝！${RESET}"
+        return 1
+      fi
+      read -p "請輸入域名：" domain
+      if site setup "$domain" proxy 127.0.0.1 https "$host_port"; then
+        echo "訪問位置：https://$domain"
+      else
+        echo "訪問位置："
+        ips $host_port https
+      fi
+    else
+      echo "訪問位置："
+      ips $host_port https
+    fi
+    read -p "操作完成，請按任意鍵繼續" -n1
+    ;;
+  uptime-kuma)
+    mkdir -p /srv/docker/uptime-kuma
+    docker run -d --restart=always -p $host_port:3001 -v /srv/docker/uptime-kuma:/app/data --name uptime-kuma louislam/uptime-kuma:latest
+    read -p "是否需要反向代理？（Y/n）" confirm
+    confirm=${confirm,,}
+    if [[ "$confirm" == y || "$confirm" == "" ]]; then
+      if ! command -v site >/dev/null 2>&1; then
+        echo "您好，您尚未安裝站點管理器。"
+        read -p "操作完成，請按任意鍵繼續" -n1
+        return 1
+      fi
+      read -p "請輸入域名：" domain
+      if site setup "$domain" proxy 127.0.0.1 https "$host_port"; then
+        echo "===== uptime kuma資訊 ====="
+        echo "訪問位置：https://$domain"
+      else
+        echo "===== uptime kuma資訊 ====="
+        echo "訪問位置："
+        ips $host_port
+      fi
+    else
+      echo "===== uptime kuma資訊 ====="
+      echo "訪問位置："
+      ips $host_port
+    fi
+    read -p "操作完成，請按任意鍵繼續" -n1
+    ;;
+  openlist)
+    mkdir /srv/docker/openlist
+    docker run -d \
+			--restart=always \
+			-v /srv/docker/openlist:/opt/openlist/data \
+			-p $host_port:5244 \
+			-e PUID=0 \
+			-e PGID=0 \
+			-e UMASK=022 \
+			--name="openlist" \
+			openlistteam/openlist:latest-lite-aria2 
+		local admin_pass=$(docker logs openlist 2>&1 | grep 'initial password is' | awk '{print $NF}')
+		read -p "是否需要反向代理？（Y/n）" confirm
+    confirm=${confirm,,}
+    if [[ "$confirm" == y || "$confirm" == "" ]]; then
+      if ! command -v site >/dev/null 2>&1; then
+        echo "您好，您尚未安裝站點管理器。"
+        read -p "操作完成，請按任意鍵繼續" -n1
+        return 1
+      fi
+      read -p "請輸入域名：" domain
+      if site setup $domain proxy 127.0.0.1 http $host_port; then
+        echo "===== openlist資訊 ====="
+        echo "訪問位置：https://$domain"
+      else
+        echo "===== openlist資訊 ====="
+        echo "訪問位置："
+        ips $host_port
+      fi
+    else
+      echo "===== openlist資訊 ====="
+      echo "訪問位置："
+      ips $host_port
+    fi
+    echo -e "${GREEN}✅ 管理員資訊：${RESET}"
+    echo -e "帳號名：${CYAN}admin${RESET}"
+    echo -e "密碼：${CYAN}$admin_pass${RESET}"
+    Tips
+    read -p "操作完成，請按任意鍵繼續" -n1
+    ;;
+  cloudreve)
+    mkdir -p /srv/docker/cloudreve
+    cd /srv/docker/cloudreve
+    mkdir {avatar,uploads}
+    touch {conf.ini,cloudreve.db}
+    docker run -d \
+      --name cloudreve \
+      --restart always \
+      -p $host_port:5212 \
+      -v /srv/downloads:/data \
+      -v /srv/docker/cloudreve/uploads:/cloudreve/uploads \
+      -v /srv/docker/cloudreve/conf.ini:/cloudreve/conf.ini \
+      -v /srv/docker/cloudreve/cloudreve.db:/cloudreve/cloudreve.db \
+      -v /srv/docker/cloudreve/avatar:/cloudreve/avatar \
+      cloudreve/cloudreve:latest
+    read -p "是否需要反向代理？（Y/n）" confirm
+    confirm=${confirm,,}
+    if [[ "$confirm" == y || "$confirm" == "" ]]; then
+      if ! command -v site >/dev/null 2>&1; then
+        echo "您好，您尚未安裝站點管理器。"
+        read -p "操作完成，請按任意鍵繼續" -n1
+        return 1
+      fi
+      read -p "請輸入域名：" domain
+      if site setup $domain proxy 127.0.0.1 http $host_port; then
+        echo "===== cloudreve資訊 ====="
+        echo "訪問位置：https://$domain"
+      else
+        echo "===== cloudreve資訊 ====="
+        echo "訪問位置："
+        ips $host_port
+      fi
+    else
+      echo "===== cloudreve資訊 ====="
+      echo "訪問位置："
+      ips $host_port
+    fi
+    echo -e "${GREEN}✅ 管理員資訊：${RESET}"
+    echo -e "${YELLOW}帳號密碼第一次註冊即可是管理員${RESET}"
+    echo -e "${CYAN}Cloudreve 已內建 Aria2，無需另外部署。${RESET}"
+    echo -e "  🔑 Token：${GREEN}空白即可，無需填入${RESET}"
+    read -p "操作完成，請按任意鍵繼續" -n1
+    ;;
+  zerotier)
+    docker run -d \
+      --restart always \
+      --name zerotier-one --device=/dev/net/tun \
+      --net=host \
+      --cap-add=NET_ADMIN \
+      --cap-add=SYS_ADMIN \
+      -v /var/lib/zerotier-one:/var/lib/zerotier-one \
+      zyclonite/zerotier
+    read -p "請輸入網路id：" zt_id
+    docker exec zerotier-one zerotier-cli join $zt_id
+    ;;
+  Aria2Ng)
+    mkdir -p /srv/downloads
+    local aria_rpc=$(openssl rand -hex 12)
+    docker run -d \
+      --name aria2 \
+      --restart always \
+      -p 6800:6800 \
+      -e RPC_SECRET=$aria_rpc \
+      -e RPC_PORT=6800 \
+      -e DOWNLOAD_DIR=/data \
+      -e PUID=0 \
+      -e PGID=0 \
+      -e UMASK_SET=022 \
+      -e TZ=Asia/Shanghai \
+      -v /srv/docker/aria2/config:/config \
+      -v /srv/downloads:/data \
+      ddsderek/aria2-pro
+    docker run -d \
+      --name Aria2Ng \
+      --log-opt max-size=1m \
+      --restart always \
+      -p $host_port:6880 \
+      p3terx/ariang
+    echo -e "${YELLOW}這邊就不給反代了，因為Aria2 RPC位置會自動變成https，就不相容於我們的aria2 是http的${RESET}" 
+    echo "===== Aria2Ng資訊 ====="
+    echo "訪問位置："
+    ips $host_port
+    echo "=====aria2填入 Aria2Ng資訊 =====" 
+    local ip_6800=$(ips "6800")
+    echo -e "${YELLOW}在 Aria2Ng 中填入如下格式：${RESET}"
+    ips "6800"
+    echo -e "${YELLOW}請選擇能從你 Aria2Ng 連線的 IP 地址！${RESET}"
+    echo -e "Token: ${CYAN}$aria_rpc${RESET}"
+    echo -e "${YELLOW}⚠ 如果瀏覽器無法連上 RPC，請檢查：${RESET}"
+    echo "1. 是否開啟 6800 端口"
+    echo "2. 是否被防火牆攔住"
+    echo "3. Aria2Ng 中 RPC 協議需為 http，不支援 https"
+    Tips
+    echo -e "${GREEN}搞定就行，沒搞定就看上面說的再來找我，別直接怪我這腳本壞了 :)${RESET}"
+    read -p "操作完成，請按任意鍵繼續" -n1
+    ;;
+  esac
+  echo -e "${GREEN}✅ $app_name 已成功安裝！${RESET}"
 }
 
 install_docker_and_compose() {
@@ -849,104 +1072,132 @@ install_docker_and_compose() {
 
 }
 manage_docker_app() {
-    local app_name="$1"
-    local can_update="false"
-    local app_desc=""
+  clear
+  local app_name="$1"
+  local can_update="false"
+  local app_desc=""
+  local app_name2=""
 
-    # 設定各 app 說明文 與 是否支援更新
-    case "$app_name" in
-      bitwarden)
-        can_update="true"
-        app_desc="Bitwarden 是一款輕量級密碼管理工具，支援自行架設並提供瀏覽器擴充。(需要一個域名和你要安裝站點管理器)"
-        ;;
-      cloudreve)
-        can_update="false"
-        app_desc="Cloudreve 是一個私有雲盤系統，支援多存儲後端及外連分享。"
-        ;;
-    esac
+  case "$app_name" in
+    bitwarden)
+      app_name2=$app_name
+      can_update="true"
+      app_desc="Bitwarden 是一款輕量級密碼管理工具，支援自行架設並提供瀏覽器擴充。(需要一個域名和你要安裝站點管理器)"
+      ;;
+    cloudreve)
+      app_name2=$app_name
+      can_update="true"
+      app_desc="Cloudreve Cloudreve 是可多用戶的自建雲端硬碟平台，支援外掛儲存與分享連結。（aria2比較不會更新，所以我們這裡提供更新的是cloudreve本體）"
+      ;;
+    portainer)
+      app_name2=$app_name
+      can_update="true"
+      app_desc="Portainer 提供 Web UI 管理 Docker 容器、映像、網路等功能。"
+      ;;
+      
+    uptime-kuma)
+      app_name2="Uptime Kuma"
+      can_update="true"
+      app_desc="Uptime Kuma 可監控網站與服務狀態，支援通知與圖表呈現。"
+      ;;
+    openlist)
+      app_name2=$app_name
+      can_update="true"
+      app_desc="openlist 可將 Google Drive、OneDrive 等雲端硬碟掛載為可瀏覽的目錄。"
+      ;;
+    zerotier)
+      app_name2=$app_name
+      can_update="true"
+      app_desc="ZeroTier 可建立虛擬 VPN 網路，支援 NAT 穿透無需開放埠口。"
+      ;;
+    Aria2Ng)
+      app_name2=$app_name
+      can_update="true"
+      app_desc="Aria2Ng 是 Aria2 的圖形化網頁管理介面，輕量易用，並會自動部署內建的 Aria2 核心。"
+      ;;
+    *)
+      echo -e "${RED}❌ 未知應用：$app_name${RESET}"
+      return
+      ;;
+  esac
 
-    local container_exists=$(docker ps -a --format '{{.Names}}' | grep -w "^$app_name$")
+  local container_exists=$(docker ps -a --format '{{.Names}}' | grep -w "^$app_name$")
 
-    echo
-    echo -e "${BOLD_CYAN}${app_name}${RESET}"
+  echo -e "${BOLD_CYAN}🔧 管理 Docker 應用：$app_name2${RESET}"
+  echo "-----------------------------"
 
-    if [ -n "$container_exists" ]; then
-        echo -e "${GREEN}已安裝${RESET}"
+  echo -e "${CYAN}▶ 狀態檢查：${RESET}"
+  if [ -n "$container_exists" ]; then
+    echo -e "${GREEN}✅ 已安裝${RESET}"
+  else
+    echo -e "${YELLOW}⚠️ 尚未安裝${RESET}"
+  fi
+  echo
+
+  echo -e "${CYAN}▶ 應用介紹：${RESET}"
+  echo -e "$app_desc"
+  echo
+
+  if [ -n "$container_exists" ]; then
+    echo -e "${CYAN}▶ 訪問地址：${RESET}"
+    local host_port=$(docker inspect -f '{{range $p, $conf := .NetworkSettings.Ports}}{{if $conf}}{{(index $conf 0).HostPort}}{{end}}{{end}}' "$app_name" 2>/dev/null)
+    host_port="${host_port:-未知}"
+
+    ipv4=$(curl -s --connect-timeout 3 https://api64.ipify.org)
+    ipv6=$(curl -s -6 --connect-timeout 3 https://api64.ipify.org)
+    
+    if [ $app_name == portainer ]; then
+      [ -n "$ipv4" ] && echo -e "  🌐 IPv4：${BLUE}https://${ipv4}:${host_port}${RESET}"
+      [ -n "$ipv6" ] && echo -e "  🌐 IPv6：${BLUE}https://[${ipv6}]:${host_port}${RESET}"
     else
-        echo -e "${YELLOW}未安裝${RESET}"
+      [ -n "$ipv4" ] && echo -e "  🌐 IPv4：${BLUE}http://${ipv4}:${host_port}${RESET}"
+      [ -n "$ipv6" ] && echo -e "  🌐 IPv6：${BLUE}http://[${ipv6}]:${host_port}${RESET}"
+      echo
     fi
+  fi
 
-    echo "$app_desc"
-    echo "-----------"
+  echo -e "${CYAN}▶ 操作選單：${RESET}"
+  if [ -z "$container_exists" ]; then
+    echo "  1. 安裝"
+  else
+    [[ "$can_update" == "true" ]] && echo "  2. 更新"
+    echo "  3. 移除"
+  fi
+  echo
 
-    if [ -n "$container_exists" ]; then
-        # 嘗試取得綁定 port
-        local host_port=$(docker inspect -f '{{range $p, $conf := .NetworkSettings.Ports}}{{if $conf}}{{(index $conf 0).HostPort}}{{end}}{{end}}' "$app_name" 2>/dev/null)
-        host_port="${host_port:-未知}"
+  echo -ne "${YELLOW}請輸入欲執行的選項：${RESET}"
+  read choice
 
-        # 外網偵測 IPv4、IPv6
-        ipv4=$(curl -s --connect-timeout 3 https://api64.ipify.org)
-        ipv6=$(curl -s -6 --connect-timeout 3 https://api64.ipify.org)
-
-        echo "訪問地址："
-        if [ -n "$ipv4" ]; then
-            echo "http://${ipv4}:${host_port}"
-        else
-            echo "(⚠️ 未偵測到外網 IPv4)"
-        fi
-
-        if [ -n "$ipv6" ]; then
-            echo "http://[${ipv6}]:${host_port}"
-        else
-            echo "(⚠️ 未偵測到外網 IPv6)"
-        fi
-        echo "------------"
-    fi
-
-    # 動態產生選單
-    menu=""
-    if [ -z "$container_exists" ]; then
-        menu="1. 安裝"
-    else
-        menu="3. 移除"
-        [[ "$can_update" == "true" ]] && menu="1. 安裝 2. 更新 3. 移除"
-    fi
-
-    echo "$menu"
-    echo
-
-    read -p "請輸入欲執行的選項：" choice
-
-    case "$choice" in
-        1)
-            if [ -n "$container_exists" ]; then
-                echo "⚠️ 已安裝，無需重複安裝。"
-                return
-            fi
-            install_docker_app "$app_name"
-            ;;
-        2)
-            if [[ "$can_update" != "true" ]]; then
-                echo -e "${RED}❌ 此應用不支援更新操作。${RESET}"
-                return
-            fi
-            if [ -z "$container_exists" ]; then
-                echo "❌ 尚未安裝，無法更新。"
-                return
-            fi
-            update_docker_container "$app_name"
-            ;;
-        3)
-            if [ -z "$container_exists" ]; then
-                echo "❌ 尚未安裝，無法移除。"
-                return
-            fi
-            uninstall_docker_app "$app_name"
-            ;;
-        *)
-            echo "❌ 無效的選項。"
-            ;;
-    esac
+  case "$choice" in
+    1)
+      if [ -n "$container_exists" ]; then
+        echo -e "${RED}⚠️ 已安裝，無需重複安裝。${RESET}"
+        return
+      fi
+      install_docker_app "$app_name"
+      ;;
+    2)
+      if [[ "$can_update" != "true" ]]; then
+        echo -e "${RED}❌ 此應用不支援更新操作。${RESET}"
+        return
+      fi
+      if [ -z "$container_exists" ]; then
+        echo -e "${RED}❌ 尚未安裝，無法更新。${RESET}"
+        return
+      fi
+      update_docker_container "$app_name"
+      ;;
+    3)
+      if [ -z "$container_exists" ]; then
+        echo -e "${RED}❌ 尚未安裝，無法移除。${RESET}"
+        return
+      fi
+      uninstall_docker_app "$app_name"
+      ;;
+    *)
+      echo -e "${RED}❌ 無效的選項。${RESET}"
+      ;;
+  esac
 }
 restart_docker_container() {
     echo "🔍 正在讀取所有容器..."
@@ -1406,16 +1657,44 @@ uninstall_docker_app(){
 
 menu_docker_app(){
     while true; do
-      echo "docker 推薦容器"
-      echo "------------------"
-      echo "1. 安裝bitwarden密碼管理器"
-      echo ""
-      echo "0. 退出"
-      echo -n -e "\033[1;33m請選擇操作 [0-1]: \033[0m"
+      echo "🚀 Docker 推薦容器"
+      echo "------------------------"
+      echo -e "${YELLOW}🛠 系統管理與監控${RESET}"
+      echo "  1. Portainer    （容器管理面板）"
+      echo "  2. Uptime Kuma （網站監控工具）"
+      echo -e "${YELLOW}🔐 隱私保護${RESET}"
+      echo "  3. Bitwarden    （密碼管理器）"
+      echo -e "${YELLOW}☁️ 雲端儲存與下載${RESET}"
+      echo "  4. OpenList     （Alist 開源版）"
+      echo "  5. Cloudreve    （支援離線下載）"
+      echo "  6. Aria2NG      （自動搭配 Aria2）"
+      echo -e "${YELLOW}🌐 網路與穿透${RESET}"
+      echo "  7. ZeroTier     （虛擬 VPN 網路）"
+      echo
+      echo "  0. 退出"
+      echo -n -e "\033[1;33m請選擇操作 [0-6]: \033[0m"
       read -r choice
       case $choice in
       1)
+        manage_docker_app portainer
+        ;;
+      2)
+        manage_docker_app uptime-kuma
+        ;;
+      3)
         manage_docker_app bitwarden
+        ;;
+      4)
+        manage_docker_app openlist
+        ;;
+      5)
+        manage_docker_app cloudreve
+        ;;
+      6)
+        manage_docker_app Aria2Ng
+        ;;
+      7)
+        manage_docker_app zerotier
         ;;
       0)
         break
