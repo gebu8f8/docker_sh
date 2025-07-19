@@ -55,6 +55,12 @@ check_app(){
     esac
   fi
 }
+check_site_proxy_domain(){
+  local port=$1
+  if command -v site &>/dev/null; then
+    site api search proxy_domain "127.0.0.1:$port" | awk '{print "https://"$0}'
+  fi
+}
 
 delete_docker_containers() {
     echo "🔍 正在讀取所有容器..."
@@ -1142,6 +1148,7 @@ manage_docker_app() {
   echo -e "${CYAN}▶ 狀態檢查：${RESET}"
   if [ -n "$container_exists" ]; then
     echo -e "${GREEN}✅ 已安裝${RESET}"
+    local app_port=$(docker port $app_name | grep '0.0.0.0:' | sed -E 's/.*0\.0\.0\.0:([0-9]+)/\1/')
   else
     echo -e "${YELLOW}⚠️ 尚未安裝${RESET}"
   fi
@@ -1165,8 +1172,9 @@ manage_docker_app() {
     else
       [ -n "$ipv4" ] && echo -e "  🌐 IPv4：${BLUE}http://${ipv4}:${host_port}${RESET}"
       [ -n "$ipv6" ] && echo -e "  🌐 IPv6：${BLUE}http://[${ipv6}]:${host_port}${RESET}"
-      echo
     fi
+    check_site_proxy_domain $app_port
+    echo
   fi
 
   echo -e "${CYAN}▶ 操作選單：${RESET}"
@@ -1176,6 +1184,7 @@ manage_docker_app() {
     [[ "$can_update" == "true" ]] && echo "  2. 更新"
     echo "  3. 移除"
   fi
+  echo "0. 返回"
   echo
 
   echo -ne "${YELLOW}請輸入欲執行的選項：${RESET}"
@@ -1206,6 +1215,9 @@ manage_docker_app() {
         return
       fi
       uninstall_docker_app "$app_name"
+      ;;
+    0)
+      return
       ;;
     *)
       echo -e "${RED}❌ 無效的選項。${RESET}"
@@ -1670,6 +1682,7 @@ uninstall_docker_app(){
 
 menu_docker_app(){
     while true; do
+      clear
       echo "🚀 Docker 推薦容器"
       echo "------------------------"
       echo -e "${YELLOW}🛠 系統管理與監控${RESET}"
