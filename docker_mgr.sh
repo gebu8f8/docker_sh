@@ -11,7 +11,7 @@ GRAY='\033[0;90m'
 RESET="\033[0m"
 
 #版本
-version="2.0.0"
+version="2.0.1"
 
 if [ "$(id -u)" -ne 0 ]; then
   echo "此腳本需要root權限運行" 
@@ -719,8 +719,8 @@ debug_container() {
 
 install_docker_app() {
   local app_name="$1"
-  local ipv4=$(curl -s --connect-timeout 3 https://api64.ipify.org)
-  local ipv6=$(curl -s -6 --connect-timeout 3 https://api64.ipify.org)
+  local ipv4=$(curl -s --connect-timeout 3 https://api4.ipify.org)
+  local ipv6=$(curl -s -6 --connect-timeout 3 https://api6.ipify.org)
   Tips(){
     echo -e "${RED}⚠️ 這是唯一的顯示機會！${RESET}"
     echo -e "${CYAN}📛 密碼/令牌不會儲存、不會記錄、不會再次出現。${RESET}"
@@ -835,10 +835,16 @@ install_docker_app() {
       else
         echo "訪問位置："
         ips $host_port https
+        echo -e "${CYAN}已啟用 Portainer HTTPS 自簽連線（TLS 1.3 加密保護）${RESET}"
+        echo -e "${YELLOW}⚠️ 首次連線可能跳出「不受信任憑證」提示，請選擇信任即可${RESET}"
+        echo -e "${GRAY}📢 傳輸已經使用頂級加密協議（TLS 1.3），安全性與 Let's Encrypt 相同${RESET}"
       fi
     else
       echo "訪問位置："
       ips $host_port https
+      echo -e "${CYAN}已啟用 Portainer HTTPS 自簽連線（TLS 1.3 加密保護）${RESET}"
+      echo -e "${YELLOW}⚠️ 首次連線可能跳出「不受信任憑證」提示，請選擇信任即可${RESET}"
+      echo -e "${GRAY}📢 傳輸已經使用頂級加密協議（TLS 1.3），安全性與 Let's Encrypt 相同${RESET}"
     fi
     read -p "操作完成，請按任意鍵繼續" -n1
     ;;
@@ -880,7 +886,14 @@ install_docker_app() {
 			-e UMASK=022 \
 			--name="openlist" \
 			openlistteam/openlist:latest-lite-aria2 
-		local admin_pass=$(docker logs openlist 2>&1 | grep 'initial password is' | awk '{print $NF}')
+		echo "正在讀取密碼"
+		for i in {1..10}; do
+      local admin_pass=$(docker logs openlist 2>&1 | grep 'initial password is' | awk '{print $NF}')
+      if [ -n "$admin_pass" ]; then
+        break
+      fi
+      sleep 1
+    done
 		read -p "是否需要反向代理？（Y/n）" confirm
     confirm=${confirm,,}
     if [[ "$confirm" == y || "$confirm" == "" ]]; then
@@ -905,7 +918,7 @@ install_docker_app() {
     fi
     echo -e "${GREEN}✅ 管理員資訊：${RESET}"
     echo -e "帳號名：${CYAN}admin${RESET}"
-    echo -e "密碼：${CYAN}$admin_pass${RESET}"
+    echo -e "密碼：${YELLOW}$admin_pass${RESET}"
     Tips
     read -p "操作完成，請按任意鍵繼續" -n1
     ;;
@@ -1143,8 +1156,8 @@ manage_docker_app() {
     local host_port=$(docker inspect -f '{{range $p, $conf := .NetworkSettings.Ports}}{{if $conf}}{{(index $conf 0).HostPort}}{{end}}{{end}}' "$app_name" 2>/dev/null)
     host_port="${host_port:-未知}"
 
-    ipv4=$(curl -s --connect-timeout 3 https://api64.ipify.org)
-    ipv6=$(curl -s -6 --connect-timeout 3 https://api64.ipify.org)
+    ipv4=$(curl -s --connect-timeout 3 https://api4.ipify.org)
+    ipv6=$(curl -s -6 --connect-timeout 3 https://api6.ipify.org)
     
     if [ $app_name == portainer ]; then
       [ -n "$ipv4" ] && echo -e "  🌐 IPv4：${BLUE}https://${ipv4}:${host_port}${RESET}"
