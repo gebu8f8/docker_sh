@@ -11,7 +11,7 @@ GRAY="\033[0;90m"
 RESET="\033[0m"
 
 #版本
-version="2.2.1"
+version="2.3.1"
 
 #檢查是否root權限
 if [ "$(id -u)" -ne 0 ]; then
@@ -695,6 +695,49 @@ debug_container() {
   echo -e "${RED}無法進入容器 $cname：bash 和 sh 都無法使用。${RESET}"
   return 1
 }
+# 全域變數 MYSQL_CMD（陣列）將會被設定為 mysql 指令
+MYSQL_CMD=()
+
+get_mysql_command() {
+    local mysql_root_pw=""
+    local pass_file="/etc/mysql-pass.conf"
+
+    # 嘗試無密碼登入
+    if mysql -u root -e "SELECT 1;" &>/dev/null; then
+        MYSQL_CMD=("mysql" "-u" "root")
+        return 0
+    fi
+
+    # 嘗試讀取 /etc/mysql-pass.conf
+    if [ -f "$pass_file" ]; then
+        mysql_root_pw=$(< "$pass_file")
+        if mysql -u root -p"$mysql_root_pw" -e "SELECT 1;" &>/dev/null; then
+            MYSQL_CMD=("mysql" "-u" "root" "-p$mysql_root_pw")
+            return 0
+        fi
+    fi
+
+    # 不存在 conf 或無效，請使用者輸入
+    while true; do
+        read -s -p "請輸入 MySQL root 密碼：" mysql_root_pw
+        echo
+        if [ -z "$mysql_root_pw" ]; then
+            >&2 echo -e "${YELLOW}密碼不能為空，請再試一次。${RESET}"
+            continue
+        fi
+
+        if mysql -u root -p"$mysql_root_pw" -e "SELECT 1;" &>/dev/null; then
+            >&2 echo -e "${GREEN}密碼正確，已成功登入 MySQL${RESET}"
+            echo "$mysql_root_pw" > "$pass_file"
+            chmod 600 "$pass_file"
+            >&2 echo -e "${GREEN}已將 root 密碼寫入 $pass_file (權限 600)${RESET}"
+            MYSQL_CMD=("mysql" "-u" "root" "-p$mysql_root_pw")
+            return 0
+        else
+            >&2 echo -e "${RED}密碼錯誤，請再試一次。${RESET}"
+        fi
+    done
+}
 
 install_docker_app() {
   local app_name="$1"
@@ -721,33 +764,35 @@ install_docker_app() {
   }
   echo -e "${CYAN} 安裝 $app_name${RESET}"
   local host_port
-  while true; do
-    read -p "請輸入欲綁定的主機端口 (留空將從 10000-65535 中隨機選擇一個未被佔用的端口): " custom_port
+  if ! [[ "$app_name" == "zerotier" || "$app_name" == "cf_tunnel" ]]; then
+    while true; do
+      read -p "請輸入欲綁定的主機端口 (留空將從 10000-65535 中隨機選擇一個未被佔用的端口): " custom_port
 
-    if [ -z "$custom_port" ]; then
-      echo "🔄 正在尋找可用的隨機端口..."
-      while true; do
-        host_port=$(shuf -i 10000-65535 -n 1)
-        if ! ss -tln | grep -q ":$host_port "; then
-          echo -e "${GREEN} 找到可用端口: $host_port${RESET}"
-          break
-        fi
-      done
-      break
-    else
-      if [[ "$custom_port" =~ ^[0-9]+$ ]] && [ "$custom_port" -ge 1 ] && [ "$custom_port" -le 65535 ]; then
-        if ss -tln | grep -q ":$custom_port "; then
-          echo -e "${RED}端口 $custom_port 已被佔用，請重新輸入。${RESET}"
-        else
-          host_port=$custom_port
-          echo -e "${GREEN} 端口 $host_port 可用。${RESET}"
-          break
-        fi
+      if [ -z "$custom_port" ]; then
+        echo "🔄 正在尋找可用的隨機端口..."
+        while true; do
+          host_port=$(shuf -i 10000-65535 -n 1)
+          if ! ss -tln | grep -q ":$host_port "; then
+            echo -e "${GREEN} 找到可用端口: $host_port${RESET}"
+            break
+          fi
+        done
+        break
       else
-        echo -e "${RED}無效的端口號，請輸入 1-65535 之間的數字。${RESET}"
+        if [[ "$custom_port" =~ ^[0-9]+$ ]] && [ "$custom_port" -ge 1 ] && [ "$custom_port" -le 65535 ]; then
+          if ss -tln | grep -q ":$custom_port "; then
+            echo -e "${RED}端口 $custom_port 已被佔用，請重新輸入。${RESET}"
+          else
+            host_port=$custom_port
+            echo -e "${GREEN} 端口 $host_port 可用。${RESET}"
+            break
+          fi
+        else
+          echo -e "${RED}無效的端口號，請輸入 1-65535 之間的數字。${RESET}"
+        fi
       fi
-    fi
-  done
+    done
+  fi
   mkdir -p /srv/docker
   case $app_name in
   bitwarden)
@@ -881,6 +926,7 @@ install_docker_app() {
     ;;
   Aria2Ng)
     mkdir -p /srv/downloads
+    mkdir -p /srv/docker/aria2
     local aria_rpc=$(openssl rand -hex 12)
     docker run -d \
       --name aria2 \
@@ -919,6 +965,65 @@ install_docker_app() {
     echo -e "${GREEN}搞定就行，沒搞定就看上面說的再來找我，別直接怪我這腳本壞了 :)${RESET}"
     read -p "操作完成，請按任意鍵繼續" -n1
     ;;
+    nextcloud)
+      mkdir -p /srv/docker/nextcloud
+      if ! command -v mysql >/dev/null 2>&1; then
+        if ! command -v redis-server >/dev/null 2>&1; then
+          docker run -d --name nextcloud \
+            -p $host_port:80 \
+            --restart always \
+            -v /srv/docker/nextcloud:/var/www/html \
+            --add-host=host.docker.internal:host-gateway
+            nextcloud:stable
+        else
+          docker run -d --name nextcloud \
+            -p $host_port:80 \
+            --restart always \
+            -v /srv/docker/nextcloud:/var/www/html
+            -e REDIS_HOST=host.docker.internal \
+            --add-host=host.docker.internal:host-gateway \
+            nextcloud:stable
+        fi
+      else
+        get_mysql_command
+        local db_pass=$(openssl rand -hex 12)
+        "${MYSQL_CMD[@]}" -e "CREATE DATABASE nextcloud DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;"
+        "${MYSQL_CMD[@]}" -e "CREATE USER 'ncuser'@'%' IDENTIFIED BY '$db_pass';"
+        "${MYSQL_CMD[@]}" -e "GRANT ALL PRIVILEGES ON nextcloud.* TO 'ncuser'@'%';"
+        "${MYSQL_CMD[@]}" -e "FLUSH PRIVILEGES;"
+        if command -v redis-server >/dev/null 2>&1; then
+          docker run -d --name nextcloud \
+            -p $host_port:80 \
+            --restart always \
+            -v /srv/docker/nextcloud:/var/www/html \
+            -e MYSQL_HOST=host.docker.internal \
+            -e MYSQL_DATABASE=nextcloud \
+            -e MYSQL_USER=ncuser \
+            -e MYSQL_PASSWORD=$db_pass \
+            -e REDIS_HOST=host.docker.internal \
+            --add-host=host.docker.internal:host-gateway \
+            nextcloud:stable
+        else
+          docker run -d --name nextcloud \
+            -p $host_port:80 \
+            --restart always \
+            -v /srv/docker/nextcloud:/var/www/html \
+            -e MYSQL_HOST=host.docker.internal \
+            -e MYSQL_DATABASE=nextcloud \
+            -e MYSQL_USER=ncuser \
+            -e MYSQL_PASSWORD=$db_pass \
+            --add-host=host.docker.internal:host-gateway \
+            nextcloud:stable
+        fi
+      fi
+      echo "===== Nextcloud資訊 ====="
+      echo "訪問位置："
+      ips $host_port
+      ;;
+    cloudflared)
+      read -p "請輸入您的隧道Token：" cloudflared_token
+      docker run -d --name cloudflared --network host --restart always cloudflare/cloudflared:latest tunnel --no-autoupdate run --token $cloudflared_token
+      ;;
   esac
   echo -e "${GREEN}$app_name 已成功安裝！${RESET}"
 }
@@ -1010,10 +1115,20 @@ manage_docker_app() {
     can_update="true"
     app_desc="openlist 可將 Google Drive、OneDrive 等雲端硬碟掛載為可瀏覽的目錄。"
     ;;
+  nextcloud)
+    app_name2="Nextcloud"
+    can_update="true"
+    app_desc="Nextcloud：自架雲端硬碟，解決個人或團隊檔案同步與分享。支援多用戶權限管理、網頁介面、WebDAV，並可搭配 OnlyOffice 成為完整辦公套件。"
+    ;;
   zerotier)
     app_name2=$app_name
     can_update="true"
     app_desc="ZeroTier 可建立虛擬 VPN 網路，支援 NAT 穿透無需開放埠口。"
+    ;;
+  cloudflared)
+    app_name2="Cloudflare tunnel"
+    can_update="true"
+    app_desc="Cloudflare Tunnel 可將本地伺服器安全地暴露在網路上，無需開放防火牆或設置 DDNS。適合自架面板、Web 服務等使用情境，具備免費 SSL、全自動憑證管理及中轉防護。搭配 Cloudflare 帳號即可快速部署。"
     ;;
   Aria2Ng)
     app_name2=$app_name
@@ -1042,30 +1157,34 @@ manage_docker_app() {
   echo -e "${CYAN}應用介紹：${RESET}"
   echo -e "$app_desc"
   echo
-
+  
   if [ -n "$container_exists" ]; then
     echo -e "${CYAN}訪問地址：${RESET}"
-    if ! [ $app_name == zerotier ]; then
+
+    # 只對需要網路訪問的應用獲取 IP 和 Port
+    if ! [[ "$app_name" == "zerotier" || "$app_name" == "cf_tunnel" ]]; then
       local host_port=$(docker inspect -f '{{range $p, $conf := .NetworkSettings.Ports}}{{if $conf}}{{(index $conf 0).HostPort}}{{end}}{{end}}' "$app_name" 2>/dev/null)
       host_port="${host_port:-未知}"
       local ipv4=$(curl -s --connect-timeout 3 https://api4.ipify.org)
       local ipv6=$(curl -s -6 --connect-timeout 3 https://api6.ipify.org)
-    fi
-    
-    if [ $app_name == portainer ]; then
-      [ -n "$ipv4" ] && echo -e "IPv4：${BLUE}https://${ipv4}:${host_port}${RESET}"
-      [ -n "$ipv6" ] && echo -e "IPv6：${BLUE}https://[${ipv6}]:${host_port}${RESET}"
-    elif [ $app_name == zerotier ]; then
-      echo
-    else
-      [ -n "$ipv4" ] && echo -e "IPv4：${BLUE}http://${ipv4}:${host_port}${RESET}"
-      [ -n "$ipv6" ] && echo -e "IPv6：${BLUE}http://[${ipv6}]:${host_port}${RESET}"
-    fi
-    if ! [ $app_name == zerotier ]; then
+
+      # 使用 if/elif/else 結構來處理不同情況
+      if [ "$app_name" == "portainer" ]; then
+        [ -n "$ipv4" ] && echo -e "IPv4：${BLUE}https://${ipv4}:${host_port}${RESET}"
+        [ -n "$ipv6" ] && echo -e "IPv6：${BLUE}https://[${ipv6}]:${host_port}${RESET}"
+      else
+        # 其他所有需要顯示 IP 的應用
+        [ -n "$ipv4" ] && echo -e "IPv4：${BLUE}http://${ipv4}:${host_port}${RESET}"
+        [ -n "$ipv6" ] && echo -e "IPv6：${BLUE}http://[${ipv6}]:${host_port}${RESET}"
+      fi
+
       check_site_proxy_domain $host_port
+      echo
     fi
-    echo
   fi
+
+
+  
 
   echo -e "${CYAN}操作選單：${RESET}"
   if [ -z "$container_exists" ]; then
@@ -1112,20 +1231,19 @@ manage_docker_app() {
     ;;
   4)
     check_site
-    if select_domain_from_proxy $host_port; then
-      if [ $app_name == portainer ]; then
-        site setup $SELECTED_DOMAIN proxy 127.0.0.1 https $host_port || {
-          echo "站點搭建失敗"
-          return 1
-        }
-      else
-        site setup $SELECTED_DOMAIN proxy 127.0.0.1 http $host_port || {
-          echo "站點搭建失敗"
-          return 1
-        }
-      fi
+    read -p "請輸入域名:" domain
+    if [ $app_name == portainer ]; then
+      site setup $domain proxy 127.0.0.1 https $host_port || {
+      echo "站點搭建失敗"
+      return 1
+      }
+    else
+      site setup $domain proxy 127.0.0.1 http $host_port || {
+        echo "站點搭建失敗"
+        return 1
+      }
     fi
-    echo -e "${GREEN}站點搭建完成，網址：$SELECTED_DOMAIN${RESET}"
+    echo -e "${GREEN}站點搭建完成，網址：$domain${RESET}"
     read -p "操作完成，按任意鍵繼續" -n1
     ;;
   5)
@@ -1136,7 +1254,7 @@ manage_docker_app() {
         return 1
       }
     fi
-    echo -e "${GREEN}站點刪除完成{RESET}"
+    echo -e "${GREEN}站點刪除完成${RESET}"
     read -p "操作完成，按任意鍵繼續" -n1
     ;;
   0)
@@ -1543,7 +1661,6 @@ update_restart_policy() {
 update_docker_container() {
     local container_name="$1"
 
-    # 檢查容器是否存在
     if ! docker inspect "$container_name" &>/dev/null; then
         echo -e "${RED}容器 $container_name 不存在，無法更新。${RESET}"
         return 1
@@ -1551,36 +1668,23 @@ update_docker_container() {
 
     echo -e "${CYAN}正在分析 $container_name 參數...${RESET}"
 
-    # 取得 image 名稱
     local image=$(docker inspect -f '{{.Config.Image}}' "$container_name")
-
-    # pull 最新版本
     docker pull "$image"
 
-    # 解析端口對應
     declare -A seen_ports
     port_args=""
 
     while IFS= read -r line; do
       container_port=$(echo "$line" | awk '{print $1}' | cut -d'/' -f1)
-
-      # 若這個 container port 已處理過就跳過
-      if [[ -n "${seen_ports[$container_port]}" ]]; then
-        continue
-      fi
+      if [[ -n "${seen_ports[$container_port]}" ]]; then continue; fi
       seen_ports[$container_port]=1
-
-      # 解析 host port
       host_port=$(echo "$line" | awk '{print $NF}' | cut -d':' -f2)
-
-      # 若host_port非空才加入
       if [[ -n "$host_port" && -n "$container_port" ]]; then
         port_args="$port_args -p ${host_port}:${container_port}"
       fi
     done < <(docker port "$container_name")
 
     local volumes=$(docker inspect -f '{{range .Mounts}}-v {{.Source}}:{{.Destination}} {{end}}' "$container_name")
-
     local envs=$(docker inspect -f '{{range $index, $value := .Config.Env}}-e {{$value}} {{end}}' "$container_name")
 
     local restart=$(docker inspect -f '{{.HostConfig.RestartPolicy.Name}}' "$container_name")
@@ -1589,12 +1693,20 @@ update_docker_container() {
         restart_arg="--restart=$restart"
     fi
 
-    # 停止並刪除原容器
+    # 抓取 network 設定（只取第一個）
+    local network=$(docker inspect -f '{{range $k, $v := .NetworkSettings.Networks}}{{println $k}}{{end}}' "$container_name" | head -n1)
+    local network_arg=""
+    if [[ -n "$network" ]]; then
+        network_arg="--network=$network"
+    fi
+
+    # 抓取 extra hosts（例如 host.docker.internal）
+    local extra_hosts=$(docker inspect -f '{{range .HostConfig.ExtraHosts}}--add-host={{.}} {{end}}' "$container_name")
+
     docker stop "$container_name"
     docker rm "$container_name"
 
-    # 使用新 image 重建 container
-    docker run -d --name "$container_name" $restart_arg $port_args $volumes $envs "$image"
+    docker run -d --name "$container_name" $restart_arg $network_arg $port_args $volumes $envs $extra_hosts "$image"
 
     echo -e "${GREEN}$container_name 已更新並重新啟動。${RESET}"
 }
@@ -1608,6 +1720,14 @@ uninstall_docker_app(){
     docker stop aria2
     docker rm aria2
     rm -rf /srv/docker/aria2
+    ;;
+  nextcloud)
+    if command -v mysql >/dev/null 2>&1; then
+      get_mysql_command
+      "${MYSQL_CMD[@]}" -e "DROP DATABASE IF EXISTS nextcloud;"
+      "${MYSQL_CMD[@]}" -e "DROP USER IF EXISTS 'ncuser'@'%';"
+      "${MYSQL_CMD[@]}" -e "FLUSH PRIVILEGES;"
+    fi
     ;;
   esac
   echo -e "已移除容器 $app_name。${RESET}"
@@ -1635,11 +1755,13 @@ menu_docker_app(){
     echo "4. OpenList     （Alist 開源版）"
     echo "5. Cloudreve    （支援離線下載）"
     echo "6. Aria2NG      （自動搭配 Aria2）"
+    echo -e "7. Nextcloud （自架雲端硬碟）${YELLOW}【低配伺服器慎用】${RESET}"
     echo -e "${YELLOW}網路與穿透${RESET}"
-    echo "7. ZeroTier     （虛擬 VPN 網路）"
+    echo "8. ZeroTier     （虛擬 VPN 網路）"
+    echo "9. Cloudflare tunnel （內網穿透）"
     echo
     echo "0. 退出"
-    echo -en "\033[1;33m請選擇操作 [0-7]: \033[0m"
+    echo -en "\033[1;33m請選擇操作 [0-9]: \033[0m"
     read -r choice
     case $choice in
     1)
@@ -1661,7 +1783,13 @@ menu_docker_app(){
       manage_docker_app Aria2Ng
       ;;
     7)
+      manage_docker_app nextcloud
+      ;;
+    8)
       manage_docker_app zerotier
+      ;;
+    9)
+      manage_docker_app cloudflared
       ;;
     0)
       break
@@ -1673,13 +1801,13 @@ menu_docker_app(){
   done
 }
 
-update_script() {
+  ript() {
   local download_url="https://raw.githubusercontent.com/gebu8f8/docker_sh/refs/heads/main/docker_mgr.sh"
   local temp_path="/tmp/docker_mgr.sh"
   local current_script="/usr/local/bin/docker_mgr"
   local current_path="$0"
 
-  echo "🔍 正在檢查更新..."
+  echo "正在檢查更新..."
   wget -q "$download_url" -O "$temp_path"
   if [ $? -ne 0 ]; then
     echo -e "${RED} 無法下載最新版本，請檢查網路連線。${RESET}"
