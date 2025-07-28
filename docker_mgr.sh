@@ -11,7 +11,7 @@ GRAY="\033[0;90m"
 RESET="\033[0m"
 
 #版本
-version="2.3.1"
+version="2.4.0"
 
 #檢查是否root權限
 if [ "$(id -u)" -ne 0 ]; then
@@ -979,7 +979,7 @@ install_docker_app() {
           docker run -d --name nextcloud \
             -p $host_port:80 \
             --restart always \
-            -v /srv/docker/nextcloud:/var/www/html
+            -v /srv/docker/nextcloud:/var/www/html \
             -e REDIS_HOST=host.docker.internal \
             --add-host=host.docker.internal:host-gateway \
             nextcloud:stable
@@ -1243,6 +1243,10 @@ manage_docker_app() {
         return 1
       }
     fi
+    if [ $app_name == nextcloud ]; then
+      local count=$(docker exec -u www-data nextcloud php occ config:system:get trusted_domains | wc -l)
+      docker exec -u www-data nextcloud php occ config:system:set trusted_domains $count --value="$domain"
+    fi
     echo -e "${GREEN}站點搭建完成，網址：$domain${RESET}"
     read -p "操作完成，按任意鍵繼續" -n1
     ;;
@@ -1253,6 +1257,12 @@ manage_docker_app() {
         echo "站點刪除失敗"
         return 1
       }
+    fi
+    if [ $app_name == nextcloud ]; then
+      echo "請進入/srv/docker/nextcloud/config/config.php"
+      echo "將trusted_domains您的域名$SELECTED_DOMAIN刪除並陣列索引連續"
+      read -p "請按任意鍵修改..." -n1
+      nano /srv/docker/nextcloud/config/config.php
     fi
     echo -e "${GREEN}站點刪除完成${RESET}"
     read -p "操作完成，按任意鍵繼續" -n1
@@ -1801,7 +1811,7 @@ menu_docker_app(){
   done
 }
 
-  ript() {
+update_script() {
   local download_url="https://raw.githubusercontent.com/gebu8f8/docker_sh/refs/heads/main/docker_mgr.sh"
   local temp_path="/tmp/docker_mgr.sh"
   local current_script="/usr/local/bin/docker_mgr"
