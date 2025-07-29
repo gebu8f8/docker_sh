@@ -11,7 +11,7 @@ GRAY="\033[0;90m"
 RESET="\033[0m"
 
 #版本
-version="2.4.0"
+version="2.4.1"
 
 #檢查是否root權限
 if [ "$(id -u)" -ne 0 ]; then
@@ -23,6 +23,60 @@ if [ "$(id -u)" -ne 0 ]; then
   fi
 fi
 
+
+configure_redis_with_firewall_interface() {
+  local iface="$(ip route | grep default | grep -o 'dev [^ ]*' | cut -d' ' -f2)"
+  local conf="/etc/redis/redis.conf"
+
+  echo "[INFO] 檢查 Redis 是否已監聽所有介面..."
+
+  if ss -lntp | grep -qE 'LISTEN.*(0\.0\.0\.0|\[::\]):6379'; then
+    echo "[SKIP] Redis 已監聽所有介面，無需修改 bind。"
+    return 0
+  else
+    echo "[INFO] Redis 未監聽所有介面，開始修改 redis.conf..."
+
+    cp "$conf" "$conf.bak.$(date +%s)"
+    sed -i 's/^bind .*/bind * -::*/' "$conf"
+
+    service redis restart
+    sleep 1
+
+    if ss -lntp | grep -qE 'LISTEN.*(0\.0\.0\.0|\[::\]):6379'; then
+      echo "[OK] Redis 已成功監聽所有介面。"
+    else
+      echo "[ERR] Redis 重啟後仍未正確監聽，請手動檢查。"
+      return 1
+    fi
+  fi
+
+  echo "[INFO] 使用 redis-cli 關閉 protected-mode..."
+
+  redis-cli CONFIG SET protected-mode no
+  redis-cli CONFIG REWRITE
+
+  echo "[INFO] 設定防火牆：封鎖 interface $iface 的 Redis 外部連線..."
+
+  iptables -C INPUT -i "$iface" -p tcp --dport 6379 -j DROP 2>/dev/null || \
+  iptables -A INPUT -i "$iface" -p tcp --dport 6379 -j DROP
+
+  ip6tables -C INPUT -i "$iface" -p tcp --dport 6379 -j DROP 2>/dev/null || \
+  ip6tables -A INPUT -i "$iface" -p tcp --dport 6379 -j DROP
+
+  if systemctl is-active firewalld &>/dev/null; then
+    echo "[INFO] 偵測到 firewalld，加入封鎖 rich rule..."
+    firewall-cmd --permanent --add-rich-rule="rule interface name=\"$iface\" port port=\"6379\" protocol=\"tcp\" reject"
+    firewall-cmd --reload
+  fi
+
+  if command -v ufw &>/dev/null && ufw status | grep -q 'Status: active'; then
+    echo "[INFO] 偵測到 UFW，插入 deny in on $iface..."
+    ufw deny in on "$iface" to any port 6379 proto tcp
+  fi
+
+  echo "[DONE] Redis 防火牆限制完成。"
+  sleep 3
+}
 
 #檢查系統版本
 check_system(){
@@ -983,6 +1037,7 @@ install_docker_app() {
             -e REDIS_HOST=host.docker.internal \
             --add-host=host.docker.internal:host-gateway \
             nextcloud:stable
+            configure_redis_with_firewall_interface
         fi
       else
         get_mysql_command
@@ -1003,6 +1058,7 @@ install_docker_app() {
             -e REDIS_HOST=host.docker.internal \
             --add-host=host.docker.internal:host-gateway \
             nextcloud:stable
+            configure_redis_with_firewall_interface
         else
           docker run -d --name nextcloud \
             -p $host_port:80 \
@@ -1812,9 +1868,9 @@ menu_docker_app(){
 }
 
 update_script() {
-  local download_url="https://raw.githubusercontent.com/gebu8f8/docker_sh/refs/heads/main/docker_mgr.sh"
+  local download_url="https://gitlab.com/gebu8f/sh/-/raw/main/docker/docker_mgr.sh"
   local temp_path="/tmp/docker_mgr.sh"
-  local current_script="/usr/local/bin/docker_mgr"
+  local current_script="/usr/local/bin/d"
   local current_path="$0"
 
   echo "正在檢查更新..."
