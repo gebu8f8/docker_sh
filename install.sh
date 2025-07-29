@@ -12,8 +12,8 @@ check_wget(){
 }
 check_wget
 
-install_path="/usr/local/bin/docker_mgr"
-run_cmd="docker_mgr"
+install_path="/usr/local/bin/d"
+run_cmd="d"
 
 echo "正在下載腳本..."
 wget -qO "$install_path" https://raw.githubusercontent.com/gebu8f8/docker_sh/refs/heads/main/docker_mgr.sh || {
