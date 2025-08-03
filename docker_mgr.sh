@@ -11,7 +11,7 @@ GRAY="\033[0;90m"
 RESET="\033[0m"
 
 #版本
-version="2.4.1"
+version="2.5.1"
 
 #檢查是否root權限
 if [ "$(id -u)" -ne 0 ]; then
@@ -22,7 +22,6 @@ if [ "$(id -u)" -ne 0 ]; then
     echo "無sudo指令"
   fi
 fi
-
 
 configure_redis_with_firewall_interface() {
   local iface="$(ip route | grep default | grep -o 'dev [^ ]*' | cut -d' ' -f2)"
@@ -75,7 +74,7 @@ configure_redis_with_firewall_interface() {
   fi
 
   echo "[DONE] Redis 防火牆限制完成。"
-  sleep 3
+  sheep 3
 }
 
 #檢查系統版本
@@ -122,106 +121,75 @@ check_site_proxy_domain(){
 }
 
 delete_docker_containers() {
-    echo " 正在讀取所有容器..."
+  echo "正在讀取所有容器..."
 
-    local all_containers=$(docker ps -a --format "{{.ID}}|{{.Names}}|{{.Status}}|{{.Image}}")
+  local all_containers=$(docker ps -a --format "{{.ID}}|{{.Names}}|{{.Status}}|{{.Image}}")
 
-    if [ -z "$all_containers" ]; then
-        echo "系統沒有任何容器！"
-        return
+  if [ -z "$all_containers" ]; then
+    echo "系統沒有任何容器！"
+    return
+  fi
+
+  local containers_list=()
+  local index=1
+
+  echo "以下是目前所有容器："
+  while IFS='|' read -r id name status image; do
+    containers_list+=("$id|$name|$status|$image")
+    echo "$index ） $name"
+    index=$((index+1))
+  done <<< "$all_containers"
+  local selected_ids=()
+
+  read -p "請輸入要刪除的容器編號（可空白隔開多個）: " input_indexes
+
+  for i in $input_indexes; do
+    if ! [[ "$i" =~ ^[0-9]+$ ]]; then
+      echo -e "${RED} 無效編號：$i${RESET}"
+      continue
     fi
-
-    local containers_list=()
-    local index=1
-
-    echo "以下是目前所有容器："
-    while IFS='|' read -r id name status image; do
-        containers_list+=("$id|$name|$status|$image")
-        echo "$index ） $name"
-        index=$((index+1))
-    done <<< "$all_containers"
-
-    echo
-    echo "請選擇刪除方式："
-    echo "1）編號選擇"
-    echo "2）手動輸入容器名稱或 ID（可空白隔開多個）"
-    read -p "請輸入選項（1或2）: " mode
-
-    local selected_ids=()
-
-    if [ "$mode" == "1" ]; then
-        read -p "請輸入要刪除的容器編號（可空白隔開多個）: " input_indexes
-
-        for i in $input_indexes; do
-            if ! [[ "$i" =~ ^[0-9]+$ ]]; then
-                echo -e "${RED} 無效編號：$i${RESET}"
-                continue
-            fi
-            if [ "$i" -ge 1 ] && [ "$i" -lt "$index" ]; then
-                IFS='|' read -r id name status image <<< "${containers_list[$((i-1))]}"
-                selected_ids+=("$id|$name|$status|$image")
-            else
-                echo -e "${RED}編號 $i 不存在！${RESET}"
-            fi
-        done
-
-    elif [ "$mode" == "2" ]; then
-        read -p "請輸入要刪除的容器名稱或 ID（可空白隔開多個）: " input_names
-
-        for keyword in $input_names; do
-            matched=$(docker ps -a --filter "id=$keyword" --format "{{.ID}}|{{.Names}}|{{.Status}}|{{.Image}}")
-            if [ -z "$matched" ]; then
-                matched=$(docker ps -a --filter "name=$keyword" --format "{{.ID}}|{{.Names}}|{{.Status}}|{{.Image}}")
-            fi
-            if [ -n "$matched" ]; then
-                selected_ids+=("$matched")
-            else
-                echo -e "${RED} 找不到容器：$keyword${RESET}"
-            fi
-        done
+    if [ "$i" -ge 1 ] && [ "$i" -lt "$index" ]; then
+      IFS='|' read -r id name status image <<< "${containers_list[$((i-1))]}"
+        selected_ids+=("$id|$name|$status|$image")
     else
-        echo -e "${RED} 輸入錯誤，操作中止。${RESET}"
-        return
+      echo -e "${RED}編號 $i 不存在！${RESET}"
+    fi
+  done
+
+  if [ ${#selected_ids[@]} -eq 0 ]; then
+    echo "${RED} 沒有選擇任何有效容器，操作中止。${RESET}"
+    return
+  fi
+
+  for info in "${selected_ids[@]}"; do
+    IFS='|' read -r id name status image <<< "$info"
+
+    echo "正在處理容器：$name ($id)"
+
+    # 若容器正在運行，先停止
+    if [[ "$status" =~ ^Up ]]; then
+      echo "容器正在運行，先停止..."
+      docker stop "$id"
     fi
 
-    if [ ${#selected_ids[@]} -eq 0 ]; then
-        echo "${RED} 沒有選擇任何有效容器，操作中止。${RESET}"
-        return
-    fi
-
-    for info in "${selected_ids[@]}"; do
-        IFS='|' read -r id name status image <<< "$info"
-
-        echo "正在處理容器：$name ($id)"
-
-        # 若容器正在運行，先停止
-        if [[ "$status" =~ ^Up ]]; then
-            echo "容器正在運行，先停止..."
-            docker stop "$id"
-        fi
-
-        # 刪除容器
-        docker rm "$id"
-        if [[ $? -eq 0 ]]; then
-            echo -e ${GREEN}"容器 $name 已刪除${RESET}"
-
-            # 詢問是否刪除鏡像
-            read -p "是否同時刪除鏡像 $image？ (y/n) " delete_image
-            if [[ "$delete_image" =~ ^[Yy]$ ]]; then
-                docker rmi "$image"
-                if [[ $? -eq 0 ]]; then
-                    echo "${GREEN}鏡像 $image 已刪除${RESET}"
-                else
-                    echo -e "${RED}鏡像 $image 刪除失敗或已被其他容器使用${RESET}"
-                fi
-            fi
+    # 刪除容器
+    if docker rm "$id"; then
+      echo -e ${GREEN}"容器 $name 已刪除${RESET}"
+      # 詢問是否刪除鏡像
+      read -p "是否同時刪除鏡像 $image？ (y/n) " delete_image
+      if [[ "$delete_image" =~ ^[Yy]$ ]]; then
+        if docker rmi "$image" ; then
+          echo -e "${GREEN}鏡像 $image 已刪除${RESET}"
         else
-            echo -e "${RED}容器 $name 刪除失敗${RESET}"
+          echo -e "${RED}鏡像 $image 刪除失敗或已被其他容器使用${RESET}"
         fi
-        echo
-    done
-
-    echo -e "${GREEN}操作完成${RESET}"
+      fi
+    else
+      echo -e "${RED}容器 $name 刪除失敗${RESET}"
+    fi
+    echo
+  done
+  echo -e "${GREEN}操作完成${RESET}"
 }
 
 docker_network_manager() {
@@ -969,14 +937,14 @@ install_docker_app() {
   zerotier)
     docker run -d \
       --restart always \
-      --name zerotier-one --device=/dev/net/tun \
+      --name zerotier --device=/dev/net/tun \
       --net=host \
       --cap-add=NET_ADMIN \
       --cap-add=SYS_ADMIN \
       -v /var/lib/zerotier-one:/var/lib/zerotier-one \
       zyclonite/zerotier
     read -p "請輸入網路id：" zt_id
-    docker exec zerotier-one zerotier-cli join $zt_id
+    docker exec zerotier zerotier-cli join $zt_id
     ;;
   Aria2Ng)
     mkdir -p /srv/downloads
@@ -1037,7 +1005,7 @@ install_docker_app() {
             -e REDIS_HOST=host.docker.internal \
             --add-host=host.docker.internal:host-gateway \
             nextcloud:stable
-            configure_redis_with_firewall_interface
+           configure_redis_with_firewall_interface
         fi
       else
         get_mysql_command
@@ -1079,6 +1047,33 @@ install_docker_app() {
     cloudflared)
       read -p "請輸入您的隧道Token：" cloudflared_token
       docker run -d --name cloudflared --network host --restart always cloudflare/cloudflared:latest tunnel --no-autoupdate run --token $cloudflared_token
+      ;;
+    tailscale)
+      case $system in
+      1|2)
+        curl -fsSL https://tailscale.com/install.sh | sh
+        tailscale up
+        ;;
+      *)
+        echo "不支援的系統。"
+        sleep 1
+        return 1
+        ;;
+      esac
+      echo -e "tailscale本地指令：${YELLOW}tailscale${RESET}"
+      ;;
+    beszel)
+      mkdir -p /srv/docker/beszel
+      docker run -d \
+        --name beszel \
+        --restart=always \
+        -v /srv/docker/beszel:/beszel_data \
+        -p $host_port:8090 \
+        henrygd/beszel
+      ;;
+    adminer)
+      docker run -d --name adminer -p $host_port:8080 --add-host=host.docker.internal:host-gateway adminer
+      echo -e "進去之後要填主機名稱為：${YELLOW}host.docker.internal${RESET}"
       ;;
   esac
   echo -e "${GREEN}$app_name 已成功安裝！${RESET}"
@@ -1143,6 +1138,7 @@ manage_docker_app() {
   local can_update="false"
   local app_desc=""
   local app_name2=""
+  type=${type:-none}
 
   case "$app_name" in
   bitwarden)
@@ -1179,11 +1175,13 @@ manage_docker_app() {
   zerotier)
     app_name2=$app_name
     can_update="true"
+    type=vpn
     app_desc="ZeroTier 可建立虛擬 VPN 網路，支援 NAT 穿透無需開放埠口。"
     ;;
   cloudflared)
     app_name2="Cloudflare tunnel"
     can_update="true"
+    type=vpn
     app_desc="Cloudflare Tunnel 可將本地伺服器安全地暴露在網路上，無需開放防火牆或設置 DDNS。適合自架面板、Web 服務等使用情境，具備免費 SSL、全自動憑證管理及中轉防護。搭配 Cloudflare 帳號即可快速部署。"
     ;;
   Aria2Ng)
@@ -1191,13 +1189,32 @@ manage_docker_app() {
     can_update="true"
     app_desc="Aria2Ng 是 Aria2 的圖形化網頁管理介面，輕量易用，並會自動部署內建的 Aria2 核心。"
     ;;
+  tailscale)
+    app_name2=$app_name
+    can_update="false"
+    type=vpn
+    app_desc="一款基於 WireGuard 的 VPN 工具，讓多台設備自動安全連網，無需複雜設定，輕鬆打造私人內網。雖非容器應用，但可完美搭配多台 Docker 主機使用，${YELLOW}【屬於純本地安裝的輕量級工具】${RESET}。"
+    ;;
+  beszel)
+    app_name2=Beszel
+    can_update="true"
+    app_desc="Beszel 是一款輕量級的伺服器監控平台，提供 Docker 容器統計、歷史數據追蹤和警報功能"
+    ;;
+  adminer)
+    app_name2=adminer
+    can_update="true"
+    app_desc="Adminer：支援MySQL/MariaDB、PostgreSQL等多資料庫的輕量管理工具，可透過瀏覽器操作。"
+    ;;
   *)
     echo -e "${RED}未知應用：$app_name${RESET}"
     return
     ;;
   esac
-
-  local container_exists=$(docker ps -a --format '{{.Names}}' | grep -w "^$app_name$")
+  if [ $app_name = tailscale ]; then
+    local container_exists=$(command -v tailscale)
+  else
+    local container_exists=$(docker ps -a --format '{{.Names}}' | grep -w "^$app_name$")
+  fi
 
   echo -e "${BOLD_CYAN} 管理 Docker 應用：$app_name2${RESET}"
   echo "-----------------------------"
@@ -1211,6 +1228,7 @@ manage_docker_app() {
   echo
 
   echo -e "${CYAN}應用介紹：${RESET}"
+  [[ $app_name == tailscale ]] && echo -e "${YELLOW}Tailscale 不以 Docker 容器形式運行，但非常適合 Docker 用戶跨主機串聯使用${RESET}"
   echo -e "$app_desc"
   echo
   
@@ -1218,7 +1236,7 @@ manage_docker_app() {
     echo -e "${CYAN}訪問地址：${RESET}"
 
     # 只對需要網路訪問的應用獲取 IP 和 Port
-    if ! [[ "$app_name" == "zerotier" || "$app_name" == "cf_tunnel" ]]; then
+    if ! [ $type = vpn ]; then
       local host_port=$(docker inspect -f '{{range $p, $conf := .NetworkSettings.Ports}}{{if $conf}}{{(index $conf 0).HostPort}}{{end}}{{end}}' "$app_name" 2>/dev/null)
       host_port="${host_port:-未知}"
       local ipv4=$(curl -s --connect-timeout 3 https://api4.ipify.org)
@@ -1239,16 +1257,13 @@ manage_docker_app() {
     fi
   fi
 
-
-  
-
   echo -e "${CYAN}操作選單：${RESET}"
   if [ -z "$container_exists" ]; then
     echo "1. 安裝"
   else
     [[ "$can_update" == "true" ]] && echo "2. 更新"
     echo "3. 移除"
-    if ! [ $app_name == zerotier ]; then
+    if ! [ $type = vpn ]; then
       echo "4. 配置域名訪問"
       echo "5. 移除現有的域名訪問"
     fi
@@ -1779,6 +1794,24 @@ update_docker_container() {
 uninstall_docker_app(){
   local app_name="$1"
   echo -e "${YELLOW}即將移除容器 $app_name${RESET}"
+  case $app_name in
+  tailscale)
+    case $system in
+    1)
+      tailscale logout
+      apt-get remove tailscale -y
+      ;;
+    2)
+      tailscale logout
+      yum remove -y tailscale
+      ;;
+    esac
+    rm -rf /var/lib/tailscale/tailscaled.State
+    echo -e "已移除$app_name。${RESET}"
+    sleep 1
+    return 0
+    ;;
+  esac
   docker stop "$app_name"
   docker rm "$app_name"
   case $app_name in
@@ -1815,16 +1848,19 @@ menu_docker_app(){
     echo -e "${YELLOW}系統管理與監控${RESET}"
     echo "1. Portainer    （容器管理面板）"
     echo "2. Uptime Kuma （網站監控工具）"
+    echo "3. Beszel（高性能機器監控工具）"
+    echo "4. Adminer （輕量級數據庫管理工具）"
     echo -e "${YELLOW}隱私保護${RESET}"
-      echo "3. Bitwarden    （密碼管理器）"
+      echo "5. Bitwarden    （密碼管理器）"
     echo -e "${YELLOW}雲端儲存與下載${RESET}"
-    echo "4. OpenList     （Alist 開源版）"
-    echo "5. Cloudreve    （支援離線下載）"
-    echo "6. Aria2NG      （自動搭配 Aria2）"
-    echo -e "7. Nextcloud （自架雲端硬碟）${YELLOW}【低配伺服器慎用】${RESET}"
+    echo "6. OpenList     （Alist 開源版）"
+    echo "7. Cloudreve    （支援離線下載）"
+    echo "8. Aria2NG      （自動搭配 Aria2）"
+    echo -e "9. Nextcloud （自架雲端硬碟）${YELLOW}【低配伺服器慎用】${RESET}"
     echo -e "${YELLOW}網路與穿透${RESET}"
-    echo "8. ZeroTier     （虛擬 VPN 網路）"
-    echo "9. Cloudflare tunnel （內網穿透）"
+    echo "10. ZeroTier     （虛擬 VPN 網路）"
+    echo "11. Cloudflare tunnel （內網穿透）"
+    echo "12. tailscale （虛擬VPN網路）【推薦】"
     echo
     echo "0. 退出"
     echo -en "\033[1;33m請選擇操作 [0-9]: \033[0m"
@@ -1837,25 +1873,34 @@ menu_docker_app(){
       manage_docker_app uptime-kuma
       ;;
     3)
-      manage_docker_app bitwarden
+      manage_docker_app beszel
       ;;
     4)
-      manage_docker_app openlist
+      manage_docker_app adminer
       ;;
     5)
-      manage_docker_app cloudreve
+      manage_docker_app bitwarden
       ;;
     6)
-      manage_docker_app Aria2Ng
+      manage_docker_app openlist
       ;;
     7)
-      manage_docker_app nextcloud
+      manage_docker_app cloudreve
       ;;
     8)
-      manage_docker_app zerotier
+      manage_docker_app Aria2Ng
       ;;
     9)
+      manage_docker_app nextcloud
+      ;;
+    10)
+      manage_docker_app zerotier
+      ;;
+    11)
       manage_docker_app cloudflared
+      ;;
+    12)
+      manage_docker_app tailscale
       ;;
     0)
       break
