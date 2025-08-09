@@ -11,7 +11,7 @@ GRAY="\033[0;90m"
 RESET="\033[0m"
 
 #版本
-version="2.5.1"
+version="2.5.2"
 
 #檢查是否root權限
 if [ "$(id -u)" -ne 0 ]; then
@@ -1979,11 +1979,13 @@ show_menu(){
   echo ""
   echo -e "${GREEN}10.${RESET} 推薦容器            ${GREEN}11.${RESET} Docker 容器日誌讀取"
   echo ""
-  echo -e "${GREEN}12.${RESET} 調試 Docker 容器"
+  echo -e "${GREEN}12.${RESET} 調試 Docker 容器    ${GREEN}13.${RESET} Docker 換源工具(SuperManito開源作品) "
+  echo ""
+  echo -e "${GREEN}14.${RESET} 編輯daemon.json文件【初學者慎用】"
   echo ""
   echo -e "${BLUE}u.${RESET} 更新腳本             ${RED}0.${RESET} 離開"
   echo -e "${CYAN}-------------------${RESET}"
-  echo -en "${YELLOW}請選擇操作 [1-12 / u 0]: ${RESET}"
+  echo -en "${YELLOW}請選擇操作 [1-14 / u 0]: ${RESET}"
 }
 case "$1" in
   --version|-V)
@@ -2048,6 +2050,34 @@ while true; do
   12)
     debug_container
     read -p "操作完成，請按任意鍵繼續..." -n1 
+    ;;
+  13)
+    bash <(curl -sSL https://linuxmirrors.cn/docker.sh) --only-registry
+    read -p "操作完成，請按任意鍵繼續..." -n1
+    ;;
+  14)
+    DAEMON_JSON="/etc/docker/daemon.json"
+    if [ ! -f "$DAEMON_JSON" ]; then
+        echo "檔案 $DAEMON_JSON 不存在。正在為您建立..."
+        touch "$DAEMON_JSON"
+        echo "{}" > "$DAEMON_JSON"
+    fi
+
+    checksum_before=$(md5sum "$DAEMON_JSON" 2>/dev/null | awk '{print $1}')
+    nano "$DAEMON_JSON"
+    checksum_after=$(md5sum "$DAEMON_JSON" 2>/dev/null | awk '{print $1}')
+
+    if [ "$checksum_before" != "$checksum_after" ]; then
+        echo "daemon.json 已修改，正在重啟 Docker..."
+        if service docker restart; then
+            echo "Docker 已成功重啟。"
+        else
+            echo "Docker 重啟失敗，請手動檢查。 您可以嘗試執行 'journalctl -u docker.service' 來查看日誌。"
+        fi
+    else
+        echo "daemon.json 未修改，無需重啟 Docker。"
+    fi
+    read -p "操作完成，請按任意鍵繼續..." -n1
     ;;
   0)
     echo "感謝使用。"
