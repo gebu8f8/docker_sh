@@ -11,7 +11,7 @@ GRAY="\033[0;90m"
 RESET="\033[0m"
 
 #版本
-version="2.5.2"
+version="2.5.3"
 
 #檢查是否root權限
 if [ "$(id -u)" -ne 0 ]; then
@@ -1408,98 +1408,169 @@ restart_docker_container() {
     done
   fi
 }
-
 show_docker_containers() {
-    local containers=$(docker ps -a -q)
-    if [ -z "$containers" ]; then
+    # 定義顏色
+    local YELLOW='\033[1;33m'
+    local RESET='\033[0m'
+
+    # 一次性獲取所有容器的 ID 和 名稱
+    local container_list=$(docker ps -a --format "{{.ID}}|{{.Names}}")
+
+    if [ -z "$container_list" ]; then
         echo -e "${YELLOW}  沒有任何容器存在。${RESET}"
         return
     fi
 
     local data=()
+    local max_name_len=0
 
-    for id in $containers; do
-        local name=$(docker inspect -f '{{.Name}}' "$id" | sed 's|/||')
-        local image=$(docker inspect -f '{{.Config.Image}}' "$id")
-        local size=$(docker ps -s --filter id="$id" --format "{{.Size}}" | sed 's/ (.*)//')
-        local networks=$(docker inspect -f '{{range $k, $v := .NetworkSettings.Networks}}{{printf "%s " $k}}{{end}}' "$id" | sed 's/ *$//')
-        local restart=$(docker inspect -f '{{.HostConfig.RestartPolicy.Name}}' "$id")
-        local status=$(docker inspect -f '{{.State.Status}}' "$id")
+    # --- 第一步：預處理，收集所有數據並計算最大名稱長度 ---
+    while IFS= read -r line; do
+        IFS='|' read -r id name <<< "$line"
 
-        # 翻譯容器狀態
+        if [ ${#name} -gt $max_name_len ]; then
+            max_name_len=${#name}
+        fi
+
+        local extra_info=$(docker inspect -f "{{.State.Status}}|{{.HostConfig.RestartPolicy.Name}}" "$id")
+        local status=$(echo "$extra_info" | cut -d'|' -f1)
+        local restart=$(echo "$extra_info" | cut -d'|' -f2)
+
+        local status_zh
         case "$status" in
-           "running") status_zh="運行中" ;;
+            "running") status_zh="運行中" ;;
             "exited")  status_zh="已停止" ;;
             "paused")  status_zh="已暫停" ;;
+            "created") status_zh="已建立" ;;
             *)         status_zh="$status" ;;
         esac
 
-        # 翻譯 Restart 策略
+        local restart_zh
         case "$restart" in
-            "no") restart_zh="不重啟" ;;
-            "always") restart_zh="永遠重啟" ;;
-            "on-failure") restart_zh="錯誤時重啟" ;;
-            "unless-stopped") restart_zh="意外關閉會重啟" ;;
-            *) restart_zh="未知" ;;
+            "no")             restart_zh="不重啟" ;;
+            "always")         restart_zh="永遠重啟" ;;
+            "on-failure")     restart_zh="錯誤時重啟" ;;
+            "unless-stopped") restart_zh="除手動停止外" ;;
+            *)                restart_zh="未知" ;;
         esac
 
-        # 正確取得 Port 映射
-        local ports=""
+        local external_port="無"
+        local internal_port="無"
+        local protocol="無"
+        
         local raw_ports=$(docker port "$id")
+        if [ -n "$raw_ports" ]; then
+            local target_line=$(echo "$raw_ports" | grep '0.0.0.0' | head -n 1)
+            if [ -n "$target_line" ]; then
+                local internal_part=$(echo "$target_line" | awk -F' -> ' '{print $1}')
+                local external_part=$(echo "$target_line" | awk -F' -> ' '{print $2}')
+                internal_port=$(echo "$internal_part" | awk -F'/' '{print $1}')
+                protocol=$(echo "$internal_part" | awk -F'/' '{print $2}')
+                external_port=$(echo "$external_part" | awk -F':' '{print $2}')
+            fi
+        fi
 
-        if [ -z "$raw_ports" ]; then
-            ports="無對外埠口"
+        data+=("$name|$status_zh|$external_port|$internal_port|$protocol|$restart_zh")
+    done <<< "$container_list"
+
+    # --- 第二步：進行表格化輸出 ---
+
+    # 定義各欄位的緊湊寬度（為手機終端優化）
+    local name_col_width=$((max_name_len > 8 ? max_name_len : 8))   # 容器名最小8位
+    local status_col_width=8   # "狀態"緊湊版，剛好容納"運行中"
+    local ext_port_col_width=7 # "外部端口"縮短，數字通常不超過5位
+    local int_port_col_width=9 # "內部端口"縮短  
+    local proto_col_width=5    # "協議"緊湊版，tcp剛好
+    local restart_col_width=12 # "重啟策略"緊湊版
+
+    # 計算字符串的顯示寬度（中文字符=2，英文字符=1）
+    display_width() {
+        local str="$1"
+        local width=0
+        local i=0
+        while [ $i -lt ${#str} ]; do
+            local char="${str:$i:1}"
+            # 檢查是否為多字節字符（簡單判斷）
+            if [ $(printf "%d" "'$char") -gt 127 ] 2>/dev/null; then
+                width=$((width + 2))
+            else
+                width=$((width + 1))
+            fi
+            i=$((i + 1))
+        done
+        echo $width
+    }
+
+    # 左對齊填充函數
+    pad_left() {
+        local text="$1"
+        local width="$2"
+        local current_width=$(display_width "$text")
+        local spaces=$((width - current_width))
+        if [ $spaces -gt 0 ]; then
+            printf "%s%*s" "$text" $spaces ""
         else
-            while IFS= read -r line; do
-                local port_proto=$(echo "$line" | awk -F' ' '{print $1}')
-                local mapping=$(echo "$line" | awk -F'-> ' '{print $2}')
-                if [ -z "$mapping" ]; then
-                    ports+="${port_proto}（容器內部） "
-                else
-                    ports+="${mapping} -> ${port_proto} "
-                fi
-            done <<< "$raw_ports"
-
-            ports=$(echo "$ports" | sed 's/ *$//')
+            printf "%-*.*s" $width $width "$text"
         fi
+    }
 
-        data+=("$name|$image|$status_zh|$size|$ports|$networks|$restart_zh")
-    done
+    # 右對齊填充函數  
+    pad_right() {
+        local text="$1"
+        local width="$2"
+        local current_width=$(display_width "$text")
+        local spaces=$((width - current_width))
+        if [ $spaces -gt 0 ]; then
+            printf "%*s%s" $spaces "" "$text"
+        else
+            printf "%*.*s" $width $width "$text"
+        fi
+    }
 
-    # 宣告表頭字串
-    local col1="容器名"
-    local col2="鏡像名"
-    local col3="狀態"
-    local col4="硬碟空間"
-    local col5="埠口映射"
-    local col6="網路"
-    local col7="重啟策略"
+    # 輸出表頭（使用單空格分隔符讓表格更緊湊）
+    pad_left "容器名" $name_col_width
+    printf " "
+    pad_left "狀態" $status_col_width  
+    printf " "
+    pad_right "外埠" $ext_port_col_width     # 簡化為"外埠"
+    printf " "
+    pad_right "內埠" $int_port_col_width     # 簡化為"內埠"
+    printf " "
+    pad_left "協議" $proto_col_width
+    printf " "
+    printf "重啟策略\n"
 
-    # 印出標題列
-    printf "%-20s %-30s %-10s %-12s %-30s %-15s %-20s\n" \
-        "$col1$(printf '%*s' $((20 - ${#col1} * 2)) '')" \
-        "$col2$(printf '%*s' $((30 - ${#col2} * 2)) '')" \
-        "$col3$(printf '%*s' $((10 - ${#col3} * 2)) '')" \
-        "$col4$(printf '%*s' $((12 - ${#col4} * 2)) '')" \
-        "$col5$(printf '%*s' $((30 - ${#col5} * 2)) '')" \
-        "$col6$(printf '%*s' $((15 - ${#col6} * 2)) '')" \
-        "$col7$(printf '%*s' $((20 - ${#col7} * 2)) '')"
+    # 輸出分隔線（調整為單空格分隔符的總寬度）
+    local total_width=$((name_col_width + status_col_width + ext_port_col_width + int_port_col_width + proto_col_width + restart_col_width + 2))
+    printf '%.0s-' $(seq 1 $total_width)
+    printf "\n"
 
-    printf "%s\n" "--------------------------------------------------------------------------------------------------------------------------------------------"
-
+    # 輸出數據行（使用單空格分隔符）
     for row in "${data[@]}"; do
-        IFS='|' read -r name image status size ports networks restart_zh <<< "$row"
-
-        if [ ${#image} -gt 29 ]; then
-            image="${image:0:27}..."
-        fi
-
-        if [ ${#ports} -gt 29 ]; then
-            ports="${ports:0:27}..."
-        fi
-
-        printf "%-20s %-30s %-10s %-12s %-30s %-15s %-20s\n" \
-            "$name" "$image" "$status" "$size" "$ports" "$networks" "$restart_zh"
+        IFS='|' read -r name status_zh external_port internal_port protocol restart_zh <<< "$row"
+        
+        # 容器名（左對齊）
+        pad_left "$name" $name_col_width
+        printf " "
+        
+        # 狀態（左對齊）
+        pad_left "$status_zh" $status_col_width
+        printf " "
+        
+        # 外部端口（右對齊）
+        pad_right "$external_port" $ext_port_col_width
+        printf " "
+        
+        # 內部端口（右對齊）
+        pad_right "$internal_port" $int_port_col_width
+        printf " "
+        
+        # 協議（左對齊）
+        pad_left "$protocol" $proto_col_width
+        printf " "
+        
+        # 重啟策略
+        printf "%s\n" "$restart_zh"
     done
 }
 
