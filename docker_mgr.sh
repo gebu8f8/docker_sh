@@ -11,7 +11,7 @@ GRAY="\033[0;90m"
 RESET="\033[0m"
 
 #版本
-version="2.5.3"
+version="2.5.4"
 
 #檢查是否root權限
 if [ "$(id -u)" -ne 0 ]; then
@@ -245,19 +245,23 @@ docker_network_manager() {
     read -p "請輸入網路名稱：" netname
     read -p "請輸入 Subnet (例如 172.50.0.0/24，留空自動分配)：" subnet
     read -p "請輸入 Gateway (例如 172.50.0.1，留空自動分配)：" gateway
-    cmd="docker network create"
+    cmd_array=("docker" "network" "create")
     if [ -n "$subnet" ]; then
-      cmd="$cmd --subnet $subnet"
+      cmd_array+=("--subnet" "$subnet")
     fi
     if [ -n "$gateway" ]; then
-      cmd="$cmd --gateway $gateway"
+      cmd_array+=("--gateway" "$gateway")
     fi
-    cmd="$cmd $netname"
+    cmd_array+=("$netname")
 
-    echo "執行：$cmd"
-    eval "$cmd"
-
-    echo -e "${YELLOW}已建立網路 $netname${RESET}"
+    echo "執行："
+    printf "%q " "${cmd_array[@]}"
+    echo 
+    if "${cmd_array[@]}"; then
+      echo -e "${GREEN}已成功建立網路 $netname${RESET}"
+    else
+      echo -e "${RED}建立網路 $netname 失敗！請檢查上述錯誤訊息。${RESET}"
+    fi
     ;;
   2)
     echo "刪除 Docker 網路"
