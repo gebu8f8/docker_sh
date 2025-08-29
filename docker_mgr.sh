@@ -11,7 +11,7 @@ GRAY="\033[0;90m"
 RESET="\033[0m"
 
 #版本
-version="2.5.4"
+version="2.5.5"
 
 #檢查是否root權限
 if [ "$(id -u)" -ne 0 ]; then
@@ -888,17 +888,9 @@ install_docker_app() {
     ;;
   openlist)
     mkdir /srv/docker/openlist
-    docker run -d \
-			--restart=always \
-			-v /srv/docker/openlist:/opt/openlist/data \
-			-p $host_port:5244 \
-			-e PUID=0 \
-			-e PGID=0 \
-			-e UMASK=022 \
-			--name="openlist" \
-			openlistteam/openlist:latest-lite-aria2 
-		echo "正在讀取密碼"
-		for i in {1..10}; do
+    docker run --user $(id -u):$(id -g) -d --restart=always -v /srv/docker/openlist:/opt/openlist/data -p $host_port:5244 -e UMASK=022 --name="openlist" openlistteam/openlist:latest-lite-aria2
+	echo "正在讀取密碼"
+	for i in {1..10}; do
       local admin_pass=$(docker logs openlist 2>&1 | grep 'initial password is' | awk '{print $NF}')
       if [ -n "$admin_pass" ]; then
         break
@@ -1849,20 +1841,29 @@ update_docker_container() {
         restart_arg="--restart=$restart"
     fi
 
-    # 抓取 network 設定（只取第一個）
+    # network
     local network=$(docker inspect -f '{{range $k, $v := .NetworkSettings.Networks}}{{println $k}}{{end}}' "$container_name" | head -n1)
     local network_arg=""
     if [[ -n "$network" ]]; then
         network_arg="--network=$network"
     fi
 
-    # 抓取 extra hosts（例如 host.docker.internal）
+    # extra hosts
     local extra_hosts=$(docker inspect -f '{{range .HostConfig.ExtraHosts}}--add-host={{.}} {{end}}' "$container_name")
+
+    # user
+    local user=$(docker inspect -f '{{.Config.User}}' "$container_name")
+    local user_arg=""
+    if [[ -n "$user" ]]; then
+        user_arg="--user=$user"
+    fi
 
     docker stop "$container_name"
     docker rm "$container_name"
 
-    docker run -d --name "$container_name" $restart_arg $network_arg $port_args $volumes $envs $extra_hosts "$image"
+    docker run -d --name "$container_name" \
+        $restart_arg $network_arg $port_args $volumes $envs $extra_hosts $user_arg \
+        "$image"
 
     echo -e "${GREEN}$container_name 已更新並重新啟動。${RESET}"
 }
