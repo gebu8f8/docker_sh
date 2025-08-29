@@ -11,7 +11,7 @@ GRAY="\033[0;90m"
 RESET="\033[0m"
 
 #版本
-version="2.5.5"
+version="2.6.0"
 
 #檢查是否root權限
 if [ "$(id -u)" -ne 0 ]; then
@@ -22,6 +22,12 @@ if [ "$(id -u)" -ne 0 ]; then
     echo "無sudo指令"
   fi
 fi
+
+check_dba(){
+  if ! command -v dba >/dev/null 2>&1; then
+    bash <(curl -sL https://gitlab.com/gebu8f/sh/-/raw/main/db/dba.sh) install_script
+  fi
+}
 
 configure_redis_with_firewall_interface() {
   local iface="$(ip route | grep default | grep -o 'dev [^ ]*' | cut -d' ' -f2)"
@@ -721,49 +727,6 @@ debug_container() {
   echo -e "${RED}無法進入容器 $cname：bash 和 sh 都無法使用。${RESET}"
   return 1
 }
-# 全域變數 MYSQL_CMD（陣列）將會被設定為 mysql 指令
-MYSQL_CMD=()
-
-get_mysql_command() {
-    local mysql_root_pw=""
-    local pass_file="/etc/mysql-pass.conf"
-
-    # 嘗試無密碼登入
-    if mysql -u root -e "SELECT 1;" &>/dev/null; then
-        MYSQL_CMD=("mysql" "-u" "root")
-        return 0
-    fi
-
-    # 嘗試讀取 /etc/mysql-pass.conf
-    if [ -f "$pass_file" ]; then
-        mysql_root_pw=$(< "$pass_file")
-        if mysql -u root -p"$mysql_root_pw" -e "SELECT 1;" &>/dev/null; then
-            MYSQL_CMD=("mysql" "-u" "root" "-p$mysql_root_pw")
-            return 0
-        fi
-    fi
-
-    # 不存在 conf 或無效，請使用者輸入
-    while true; do
-        read -s -p "請輸入 MySQL root 密碼：" mysql_root_pw
-        echo
-        if [ -z "$mysql_root_pw" ]; then
-            >&2 echo -e "${YELLOW}密碼不能為空，請再試一次。${RESET}"
-            continue
-        fi
-
-        if mysql -u root -p"$mysql_root_pw" -e "SELECT 1;" &>/dev/null; then
-            >&2 echo -e "${GREEN}密碼正確，已成功登入 MySQL${RESET}"
-            echo "$mysql_root_pw" > "$pass_file"
-            chmod 600 "$pass_file"
-            >&2 echo -e "${GREEN}已將 root 密碼寫入 $pass_file (權限 600)${RESET}"
-            MYSQL_CMD=("mysql" "-u" "root" "-p$mysql_root_pw")
-            return 0
-        else
-            >&2 echo -e "${RED}密碼錯誤，請再試一次。${RESET}"
-        fi
-    done
-}
 
 install_docker_app() {
   local app_name="$1"
@@ -889,8 +852,8 @@ install_docker_app() {
   openlist)
     mkdir /srv/docker/openlist
     docker run --user $(id -u):$(id -g) -d --restart=always -v /srv/docker/openlist:/opt/openlist/data -p $host_port:5244 -e UMASK=022 --name="openlist" openlistteam/openlist:latest-lite-aria2
-	echo "正在讀取密碼"
-	for i in {1..10}; do
+		echo "正在讀取密碼"
+		for i in {1..10}; do
       local admin_pass=$(docker logs openlist 2>&1 | grep 'initial password is' | awk '{print $NF}')
       if [ -n "$admin_pass" ]; then
         break
@@ -1004,12 +967,8 @@ install_docker_app() {
            configure_redis_with_firewall_interface
         fi
       else
-        get_mysql_command
-        local db_pass=$(openssl rand -hex 12)
-        "${MYSQL_CMD[@]}" -e "CREATE DATABASE nextcloud DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;"
-        "${MYSQL_CMD[@]}" -e "CREATE USER 'ncuser'@'%' IDENTIFIED BY '$db_pass';"
-        "${MYSQL_CMD[@]}" -e "GRANT ALL PRIVILEGES ON nextcloud.* TO 'ncuser'@'%';"
-        "${MYSQL_CMD[@]}" -e "FLUSH PRIVILEGES;"
+        check_dba
+        local db_pass=$(dba mysql add nextcloud ncuser --force)
         if command -v redis-server >/dev/null 2>&1; then
           docker run -d --name nextcloud \
             -p $host_port:80 \
@@ -1404,6 +1363,7 @@ restart_docker_container() {
     done
   fi
 }
+
 show_docker_containers() {
     # 定義顏色
     local YELLOW='\033[1;33m'
@@ -1817,7 +1777,26 @@ update_docker_container() {
     echo -e "${CYAN}正在分析 $container_name 參數...${RESET}"
 
     local image=$(docker inspect -f '{{.Config.Image}}' "$container_name")
-    docker pull "$image"
+
+    echo -e "${CYAN}正在拉取鏡像 $image ...${RESET}"
+    pull_output=$(docker pull "$image" 2>&1)
+    pull_status=$?
+
+    if [[ $pull_status -ne 0 ]]; then
+        echo -e "${RED}拉取鏡像失敗：$pull_output${RESET}"
+        sleep 1
+        return 1
+    fi
+
+    if echo "$pull_output" | grep -qi "up to date"; then
+        echo -e "${GREEN}$image 已是最新版本，無需更新容器。${RESET}"
+        sleep 1
+        return 0
+    fi
+
+    if echo "$pull_output" | grep -qi "Downloaded newer image"; then
+        echo -e "${CYAN}已下載新版 $image，開始更新容器...${RESET}"
+    fi
 
     declare -A seen_ports
     port_args=""
@@ -1898,10 +1877,8 @@ uninstall_docker_app(){
     ;;
   nextcloud)
     if command -v mysql >/dev/null 2>&1; then
-      get_mysql_command
-      "${MYSQL_CMD[@]}" -e "DROP DATABASE IF EXISTS nextcloud;"
-      "${MYSQL_CMD[@]}" -e "DROP USER IF EXISTS 'ncuser'@'%';"
-      "${MYSQL_CMD[@]}" -e "FLUSH PRIVILEGES;"
+      check_dba
+      dba mysql del nextcloud
     fi
     ;;
   esac
