@@ -11,7 +11,7 @@ GRAY="\033[0;90m"
 RESET="\033[0m"
 
 #版本
-version="2.6.0"
+version="2.6.1"
 
 #檢查是否root權限
 if [ "$(id -u)" -ne 0 ]; then
@@ -464,7 +464,7 @@ docker_show_logs() {
   else
     read -p "請輸入要顯示最後幾行日誌（預設 100）：" line_count
     line_count=${line_count:-100}
-    echo -e "${YELLOW}📜 顯示容器 $cname 的最後 $line_count 行日誌：${RESET}"
+    echo -e "${YELLOW}顯示容器 $cname 的最後 $line_count 行日誌：${RESET}"
     echo "-----------------------------------------------"
     docker logs --tail "$line_count" "$cname"
   fi
@@ -472,80 +472,150 @@ docker_show_logs() {
 
 
 docker_resource_manager() {
+  # --- 通用排版輔助函式 ---
+  # 計算字串的視覺寬度 (中文=2, 英文=1)
+  display_width() {
+    local str="$1"
+    local width=0
+    local i=0
+    while [ $i -lt ${#str} ]; do
+      local char="${str:$i:1}"
+      if [[ $(printf "%d" "'$char") -gt 127 ]] 2>/dev/null; then
+        width=$((width + 2))
+      else
+        width=$((width + 1))
+      fi
+      i=$((i + 1))
+    done
+    echo $width
+  }
+
+  # 左對齊填充
+  pad_left() {
+    local text="$1"
+    local max_width="$2"
+    local current_width=$(display_width "$text")
+    local padding=$((max_width - current_width))
+    printf "%s%*s" "$text" $padding ""
+  }
+
+  # 右對齊填充
+  pad_right() {
+    local text="$1"
+    local max_width="$2"
+    local current_width=$(display_width "$text")
+    local padding=$((max_width - current_width))
+    printf "%*s%s" $padding "" "$text"
+  }
+
   while true; do
-    echo -e "${CYAN}🔍 正在讀取容器資源使用狀態...${RESET}"
+    echo -e "${CYAN} 正在讀取容器資源使用狀態...${RESET}"
 
-    local all_containers=$(docker ps -a --format "{{.Names}}|{{.ID}}")
-
-    if [ -z "$all_containers" ]; then
+    # --- 效能優化: 一次性獲取所有資訊 ---
+    local all_containers_raw=$(docker ps -a --format "{{.Names}}|{{.ID}}")
+    if [ -z "$all_containers_raw" ]; then
       echo -e "${GREEN} 沒有任何容器！${RESET}"
       return
     fi
-
-    # 查詢 docker stats
     local stats_data=$(docker stats --no-stream --format "{{.Name}}|{{.CPUPerc}}|{{.MemUsage}}")
+    local all_ids=$(echo "$all_containers_raw" | cut -d'|' -f2 | tr '\n' ' ')
+    local inspect_data=$(docker inspect --format '{{.Name}}|{{.HostConfig.NanoCpus}}|{{.HostConfig.Memory}}' $all_ids 2>/dev/null)
+
+    # --- 排版處理核心：兩段式渲染 ---
+    
+    # --- 階段一：收集數據並計算各欄位最大寬度 ---
+    local headers=("編號" "容器名" "CPU (使用/限制)" "記憶體 (使用/限制)")
+    local -a max_widths=(
+      $(display_width "${headers[0]}")
+      $(display_width "${headers[1]}")
+      $(display_width "${headers[2]}")
+      $(display_width "${headers[3]}")
+    )
 
     local container_info=()
+    local data_rows=()
     local index=1
 
-    echo
-    printf "${BOLD_CYAN}%-4s %-20s %-20s %-25s %-10s${RESET}\n" "編號" "容器名" "CPU (使用/限制)" "記憶體 (使用/限制)" "硬碟"
-    echo -e "${YELLOW}------------------------------------------------------------------------------------------------${RESET}"
-
     while IFS='|' read -r name id; do
-      # 預設值
-      cpu_used="N/A"
-      cpu_limit="無限制"
-      mem_used="N/A"
-      mem_limit="無限制"
-
-      # CPU / MEM 限制
-      local cpus=$(docker inspect -f '{{.HostConfig.NanoCpus}}' "$id")
-      local mem=$(docker inspect -f '{{.HostConfig.Memory}}' "$id")
-
-      if [ "$cpus" -eq 0 ] 2>/dev/null; then
-        cpu_limit="無限制"
-      else
-        cpu_limit=$(awk -v nano="$cpus" 'BEGIN {printf "%.2f cores", nano/1000000000}')
-      fi
-
-      if [ "$mem" -eq 0 ] 2>/dev/null; then
-        mem_limit="無限制"
-      else
-        mem_limit=$(awk -v mem="$mem" 'BEGIN {
-          if (mem >= 1073741824) {
-            printf "%.2fGB", mem/1073741824
-          } else {
-            printf "%.2fMB", mem/1048576
-          }
-        }')
-      fi
-      # 查 docker stats 裡對應資料
-      local stat_line=$(echo "$stats_data" | grep "^$name|")
-      if [ -n "$stat_line" ]; then
-        IFS='|' read -r s_name s_cpu s_mem <<< "$stat_line"
-
-        # CPU 使用
-        cpu_used="$s_cpu"
-
-        # MEM 使用
-        # s_mem 格式例如 "128MiB / 512MiB"
-        mem_used_part=$(echo "$s_mem" | awk -F'/' '{print $1}' | xargs)
-        if [ -n "$mem_used_part" ]; then
-          mem_used="$mem_used_part"
-        fi
-      fi
-
-      # 硬碟佔用
-      local disk=$(docker ps -s --filter id="$id" --format "{{.Size}}" | awk '{print $1}')
-      disk="${disk:-0B}"
+      # 儲存 ID 和 Name，供後續操作使用
       container_info+=("$id|$name")
 
-      printf "${GREEN}%-4s${RESET} %-20s %-20s %-25s %-10s\n" \
-        "$index" "$name" "$cpu_used / $cpu_limit" "$mem_used / $mem_limit" "$disk"
+      # 解析 inspect 資訊
+      local inspect_line=$(echo "$inspect_data" | grep "^/$name|")
+      IFS='|' read -r _ cpus mem <<< "$inspect_line"
+      
+      local cpu_limit="無限制"
+      if ! [[ -z "$cpus" || "$cpus" == "0" || "$cpus" == "<no value>" ]]; then
+        cpu_limit=$(awk -v nano="$cpus" 'BEGIN {printf "%.2f Cores", nano/1000000000}')
+      fi
+      
+      local mem_limit="無限制"
+      if ! [[ -z "$mem" || "$mem" == "0" || "$mem" == "<no value>" ]]; then
+        mem_limit=$(awk -v mem="$mem" 'BEGIN {
+          if (mem >= 1073741824) printf "%.2fG", mem/1073741824;
+          else printf "%.2fM", mem/1048576;
+        }')
+      fi
+      
+      # 解析 stats 資訊
+      local cpu_used="N/A"
+      local mem_used="N/A"
+      local stat_line=$(echo "$stats_data" | grep "^$name|")
+      if [ -n "$stat_line" ]; then
+        IFS='|' read -r _ s_cpu s_mem <<< "$stat_line"
+        cpu_used="$s_cpu"
+        mem_used=$(echo "$s_mem" | awk -F'/' '{print $1}' | xargs)
+      fi
+
+      local cpu_str="$cpu_used / $cpu_limit"
+      local mem_str="$mem_used / $mem_limit"
+
+      # 將本行所有欄位的數據用 | 分隔後存入陣列
+      data_rows+=("$index|$name|$cpu_str|$mem_str")
+
+      # 計算本行各欄位寬度，並更新最大寬度記錄
+      local -a current_widths=(
+        $(display_width "$index")
+        $(display_width "$name")
+        $(display_width "$cpu_str")
+        $(display_width "$mem_str")
+      )
+      for i in "${!max_widths[@]}"; do
+        if [[ ${current_widths[$i]} -gt ${max_widths[$i]} ]]; then
+          max_widths[$i]=${current_widths[$i]}
+        fi
+      done
 
       index=$((index + 1))
-    done <<< "$all_containers"
+    done <<< "$all_containers_raw"
+
+    # --- 階段二：使用計算好的最大寬度，進行格式化輸出 ---
+    echo
+
+    # 輸出標頭
+    pad_left  "${headers[0]}" "${max_widths[0]}" && printf "  "
+    pad_left  "${headers[1]}" "${max_widths[1]}" && printf "  "
+    pad_right "${headers[2]}" "${max_widths[2]}" && printf "  "
+    pad_right "${headers[3]}" "${max_widths[3]}" && printf "\n"
+
+    # 輸出分隔線
+    total_width=0
+    for width in "${max_widths[@]}"; do
+      total_width=$((total_width + width))
+    done
+    total_width=$((total_width + (${#max_widths[@]} - 1) * 2)) # 加上欄位間的雙空格
+    printf '%.0s-' $(seq 1 $total_width) && printf "\n"
+
+    # 輸出數據行
+    for row in "${data_rows[@]}"; do
+      IFS='|' read -r r_index r_name r_cpu r_mem <<< "$row"
+      pad_left  "$r_index" "${max_widths[0]}" && printf "  "
+      pad_left  "$r_name"  "${max_widths[1]}" && printf "  "
+      pad_right "$r_cpu"   "${max_widths[2]}" && printf "  "
+      pad_right "$r_mem"   "${max_widths[3]}" && printf "\n"
+    done
+
+    # --- 後續操作 (邏輯不變) ---
     echo
     echo -e "${CYAN}1. 熱修改 CPU 限制${RESET}"
     echo -e "${CYAN}2. 熱修改 記憶體 限制${RESET}"
@@ -560,16 +630,10 @@ docker_resource_manager() {
         continue
       fi
       IFS='|' read -r id name <<< "${container_info[$((num-1))]}"
-      read -p "請輸入新的 CPU 配額（例如 0.5 表示 0.5 cores；輸入 0 表示無限制）: " cpu_limit
-
-      if [[ "$cpu_limit" == "0" ]]; then
-        docker update --cpus=0 "$id"
-      else
-        docker update --cpus="$cpu_limit" "$id"
-      fi
-
+      read -p "請輸入新的 CPU 配額（例如 0.5 表示 0.5 Cores；輸入 0 表示無限制）: " cpu_limit
+      docker update --cpus="$cpu_limit" "$id" > /dev/null
       if [[ $? -eq 0 ]]; then
-        echo -e "${GREEN}容器 $name CPU 限制已更新${RESET}"
+        echo -e "${GREEN}容器 '$name' CPU 限制已更新${RESET}"
       else
         echo -e "${RED}更新失敗${RESET}"
       fi
@@ -582,15 +646,9 @@ docker_resource_manager() {
       fi
       IFS='|' read -r id name <<< "${container_info[$((num-1))]}"
       read -p "請輸入新的記憶體限制（如 512m、1g，輸入 0 表示無限制）: " mem_limit
-
-      if [[ "$mem_limit" == "0" ]]; then
-        docker update --memory="" "$id"
-      else
-        docker update --memory="$mem_limit" "$id"
-      fi
-
+      docker update --memory="$mem_limit" "$id" > /dev/null
       if [[ $? -eq 0 ]]; then
-        echo -e "${GREEN}容器 $name 記憶體 限制已更新${RESET}"
+        echo -e "${GREEN}容器 '$name' 記憶體 限制已更新${RESET}"
       else
         echo -e "${RED}更新失敗${RESET}"
       fi
