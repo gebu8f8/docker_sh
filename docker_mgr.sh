@@ -11,7 +11,7 @@ GRAY="\033[0;90m"
 RESET="\033[0m"
 
 #版本
-version="2.6.1"
+version="2.7.0"
 
 #檢查是否root權限
 if [ "$(id -u)" -ne 0 ]; then
@@ -872,7 +872,7 @@ install_docker_app() {
       -e EMERGENCY_ACCESS_ALLOWED=true \
       -e WEB_VAULT_ENABLED=true \
       -e SIGNUPS_ALLOWED=true \
-      vaultwarden/server:latest
+      vaultwarden/server:latest-alpine
     site setup $domain proxy 127.0.0.1 http $host_port || {
       echo "站點搭建失敗"
       return 1
@@ -891,7 +891,7 @@ install_docker_app() {
       --restart=always \
       -v /var/run/docker.sock:/var/run/docker.sock \
       -v /srv/docker/portainer:/data \
-      portainer/portainer-ce:latest 
+      portainer/portainer-ce:alpine
     echo "訪問位置："
     ips $host_port https
     echo -e "${CYAN}已啟用 Portainer HTTPS 自簽連線（TLS 1.3 加密保護）${RESET}"
@@ -1100,50 +1100,139 @@ install_docker_and_compose() {
     echo "安裝 Docker 中..."
 
     if [ "$system" -eq 1 ] || [ "$system" -eq 2 ]; then
+      # 使用官方腳本安裝
       curl -fsSL https://get.docker.com | sh
     elif [ "$system" -eq 3 ]; then
+      # Alpine Linux
       apk add docker
     fi
-    echo -e "${GREEN} Docker 安裝完成${RESET}"
+    echo -e "${GREEN}Docker 安裝完成${RESET}"
   else
-    echo -e "${GREEN} 已安裝 Docker${RESET}"
+    echo -e "${GREEN}已安裝 Docker${RESET}"
   fi
-
-  # 安裝 Docker Compose
+ -------------------
+  # 檢查 Docker Compose (v1 或 v2 plugin) 是否已安裝
   if ! command -v docker-compose &>/dev/null && ! docker compose version &>/dev/null; then
-    echo " 安裝 Docker Compose Plugin 中..."
+    echo "準備安裝 Docker Compose Plugin..."
 
+    # 對於 Debian/Ubuntu/CentOS 系統，我們需要手動安裝
     if [ "$system" -eq 1 ] || [ "$system" -eq 2 ]; then
-      DOCKER_CONFIG=${DOCKER_CONFIG:-/usr/local/lib/docker}
+      echo "正在從 GitHub API 獲取最新的 Docker Compose 版本..."
+      # 使用 GitHub API 獲取最新的 release tag name
+      local LATEST_COMPOSE_VERSION=$(curl -s https://api.github.com/repos/docker/compose/releases/latest | jq -r .tag_name)
+
+      if [ -z "$LATEST_COMPOSE_VERSION" ] || [ "$LATEST_COMPOSE_VERSION" == "null" ]; then
+        echo -e "${RED}無法獲取最新的 Docker Compose 版本號。請檢查您的網路連線或稍後再試。${RESET}"
+        return 1
+      fi
+      
+      echo -e "最新的 Docker Compose 版本是: ${GREEN}$LATEST_COMPOSE_VERSION${RESET}"
+      echo "開始下載..."
+
+      local DOCKER_CONFIG=${DOCKER_CONFIG:-/usr/local/lib/docker}
       mkdir -p "$DOCKER_CONFIG/cli-plugins"
-      curl -SL https://github.com/docker/compose/releases/download/v2.24.5/docker-compose-linux-$(uname -m) -o "$DOCKER_CONFIG/cli-plugins/docker-compose"
+      
+      # 使用獲取到的最新版本號來下載
+      if ! curl -SL "https://github.com/docker/compose/releases/download/${LATEST_COMPOSE_VERSION}/docker-compose-linux-$(uname -m)" -o "$DOCKER_CONFIG/cli-plugins/docker-compose" ; then
+        echo -e "${RED}Docker Compose 下載失敗。${RESET}"
+        sleep 1
+        return 1
+      fi
+
       chmod +x "$DOCKER_CONFIG/cli-plugins/docker-compose"
+
     elif [ "$system" -eq 3 ]; then
+      # Alpine Linux 直接使用包管理器安裝
       apk add docker-cli-compose
     fi
-    echo -e "${GREEN} Docker Compose 安裝完成${RESET}"
+
+    # 驗證安裝
+    if docker compose version &>/dev/null; then
+      echo -e "${GREEN}Docker Compose 安裝完成，版本: $(docker compose version --short)${RESET}"
+    else
+      echo -e "${RED}Docker Compose 安裝失敗，請手動檢查。${RESET}"
+    fi
+  else
+    echo -e "${GREEN}已安裝 Docker Compose${RESET}"
   fi
+  # ------------------- 修改結束 -------------------
 
   # 啟用與開機自啟
   if [ "$system" -eq 1 ] || [ "$system" -eq 2 ]; then
     if ! systemctl is-enabled docker &>/dev/null; then
       systemctl enable docker
-      echo -e "${GREEN} 已設定 Docker 開機自啟${RESET}"
+      echo -e "${GREEN}已設定 Docker 開機自啟${RESET}"
     fi
     if ! systemctl is-active docker &>/dev/null; then
       systemctl start docker
-      echo -e "${GREEN} 已啟動 Docker 服務${RESET}"
+      echo -e "${GREEN}已啟動 Docker 服務${RESET}"
     fi
   elif [ "$system" -eq 3 ]; then
     if ! rc-update show | grep -q docker; then
       rc-update add docker default
-      echo -e "${GREEN} 已設定 Docker 開機自啟${RESET}"
+      echo -e "${GREEN}已設定 Docker 開機自啟${RESET}"
     fi
     if ! service docker status | grep -q running; then
         service docker start
-        echo -e "${GREEN} 已啟動 Docker 服務${RESET}"
+        echo -e "${GREEN}已啟動 Docker 服務${RESET}"
       fi
   fi
+}
+uninstall_docker() {
+  echo -e "${RED}警告：此操作將會徹底刪除 Docker Engine, Docker Compose，以及所有的容器、映像、儲存卷和網路。${RESET}"
+  echo -e "${YELLOW}所有 Docker 資料將會永久遺失！${RESET}"
+  read -p "您確定要繼續嗎？ [y/N]: " confirm
+  
+  # 如果使用者輸入的不是 y 或 Y，則中止操作
+  if [[ ! "$confirm" =~ ^[yY]$ ]]; then
+    echo "操作已取消。"
+    return
+  fi
+
+  echo "開始卸載 Docker..."
+
+  # 根據不同系統停止並移除 Docker
+  if [ "$system" -eq 1 ] || [ "$system" -eq 2 ]; then
+    # 停止並禁用 Systemd 服務
+    echo "正在停止並禁用 Docker 服務..."
+    systemctl stop docker.socket &>/dev/null
+    systemctl stop docker &>/dev/null
+    systemctl disable docker &>/dev/null
+
+    # 使用對應的包管理器卸載
+    echo "正在移除 Docker 相關套件..."
+    if command -v apt-get &>/dev/null; then
+      apt-get purge -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin docker-ce-rootless-extras
+      apt-get autoremove -y --purge
+    elif command -v dnf &>/dev/null; then
+      dnf remove -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+    elif command -v yum &>/dev/null; then
+      yum remove -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+    fi
+
+  elif [ "$system" -eq 3 ]; then
+    # 停止並禁用 OpenRC 服務
+    echo "正在停止並禁用 Docker 服務..."
+    service docker stop &>/dev/null
+    rc-update del docker default &>/dev/null
+    
+    # 使用 apk 卸載
+    echo "正在移除 Docker 相關套件..."
+    apk del docker docker-cli-compose
+  fi
+
+  # 刪除所有殘留的 Docker 資料
+  echo "正在刪除殘留的 Docker 資料 (映像, 容器, 儲存卷)..."
+  rm -rf /var/lib/docker
+  rm -rf /var/lib/containerd
+  rm -rf /etc/docker
+  # 手動刪除可能由腳本安裝的 compose plugin，以防萬一
+  rm -f /usr/local/lib/docker/cli-plugins/docker-compose
+  # 刪除 docker group
+  groupdel docker &>/dev/null
+
+  echo -e "${GREEN}Docker 已成功卸載。${RESET}"
+  sleep 1
 }
 manage_docker_app() {
   clear
@@ -1423,32 +1512,84 @@ restart_docker_container() {
 }
 
 show_docker_containers() {
-    # 定義顏色
-    local YELLOW='\033[1;33m'
-    local RESET='\033[0m'
+    # --- 通用排版輔助函式 ---
+    display_width() {
+        local str="$1"
+        local width=0
+        local i=0
+        while [ $i -lt ${#str} ]; do
+            local char="${str:$i:1}"
+            if [[ $(printf "%d" "'$char") -gt 127 ]] 2>/dev/null; then
+                width=$((width + 2))
+            else
+                width=$((width + 1))
+            fi
+            i=$((i + 1))
+        done
+        echo $width
+    }
 
-    # 一次性獲取所有容器的 ID 和 名稱
-    local container_list=$(docker ps -a --format "{{.ID}}|{{.Names}}")
+    pad_left() {
+        local text="$1"
+        local max_width="$2"
+        local current_width=$(display_width "$text")
+        local padding=$((max_width - current_width))
+        printf "%s%*s" "$text" $padding ""
+    }
+
+    pad_right() {
+        local text="$1"
+        local max_width="$2"
+        local current_width=$(display_width "$text")
+        local padding=$((max_width - current_width))
+        printf "%*s%s" $padding "" "$text"
+    }
+
+    # --- 效能優化：批次獲取所有容器資訊 ---
+    local container_list=$(docker ps -a --format "{{.Names}}|{{.ID}}")
 
     if [ -z "$container_list" ]; then
-        echo -e "${YELLOW}  沒有任何容器存在。${RESET}"
+        echo -e "\033[1;33m  沒有任何容器存在。\033[0m"
         return
     fi
 
-    local data=()
-    local max_name_len=0
+    # 一次性獲取所有容器的 ID
+    local all_ids=$(echo "$container_list" | cut -d'|' -f2 | tr '\n' ' ')
 
-    # --- 第一步：預處理，收集所有數據並計算最大名稱長度 ---
+    # 批次獲取 inspect 資訊並存入關聯陣列
+    declare -A status_map
+    declare -A restart_map
+    # Go 模板 {{json .}} 會輸出合法的 JSON，即使內容包含特殊字元
     while IFS= read -r line; do
-        IFS='|' read -r id name <<< "$line"
+        local name=$(echo "$line" | jq -r .Name | sed 's/^\///') # 移除 Name 前面的 /
+        local status=$(echo "$line" | jq -r .State.Status)
+        local restart=$(echo "$line" | jq -r .HostConfig.RestartPolicy.Name)
+        status_map["$name"]="$status"
+        restart_map["$name"]="$restart"
+    done <<< $(docker inspect $all_ids --format '{{json .}}')
 
-        if [ ${#name} -gt $max_name_len ]; then
-            max_name_len=${#name}
-        fi
 
-        local extra_info=$(docker inspect -f "{{.State.Status}}|{{.HostConfig.RestartPolicy.Name}}" "$id")
-        local status=$(echo "$extra_info" | cut -d'|' -f1)
-        local restart=$(echo "$extra_info" | cut -d'|' -f2)
+    # 批次獲取 stats 資訊 (只針對運行中容器)
+    declare -A mem_map
+    while IFS='|' read -r name mem_usage; do
+        mem_map["$name"]=$(echo "$mem_usage" | awk '{print $1}')
+    done <<< $(docker stats --no-stream --format "{{.Name}}|{{.MemUsage}}")
+
+    # --- 排版核心：兩段式渲染 ---
+    
+    # --- 階段一：收集數據並計算各欄位最大寬度 ---
+    local headers=("容器名" "狀態" "記憶體" "外埠" "內埠" "協議" "重啟策略")
+    local -a max_widths=()
+    for header in "${headers[@]}"; do
+        max_widths+=($(display_width "$header"))
+    done
+
+    local data_rows=()
+    while IFS='|' read -r name id; do
+        # 從快取中讀取資訊
+        local status=${status_map["$name"]}
+        local restart=${restart_map["$name"]}
+        local memory=${mem_map["$name"]:-"N/A"} # 如果容器未運行，則無記憶體資訊
 
         local status_zh
         case "$status" in
@@ -1465,126 +1606,66 @@ show_docker_containers() {
             "always")         restart_zh="永遠重啟" ;;
             "on-failure")     restart_zh="錯誤時重啟" ;;
             "unless-stopped") restart_zh="除手動停止外" ;;
-            *)                restart_zh="未知" ;;
+            *)                restart_zh="-" ;;
         esac
 
-        local external_port="無"
-        local internal_port="無"
-        local protocol="無"
+        local external_port="-"
+        local internal_port="-"
+        local protocol="-"
         
+        # docker port 依然需要單獨執行，但這是相對較快的操作
         local raw_ports=$(docker port "$id")
         if [ -n "$raw_ports" ]; then
-            local target_line=$(echo "$raw_ports" | grep '0.0.0.0' | head -n 1)
+            local target_line=$(echo "$raw_ports" | head -n 1)
             if [ -n "$target_line" ]; then
-                local internal_part=$(echo "$target_line" | awk -F' -> ' '{print $1}')
-                local external_part=$(echo "$target_line" | awk -F' -> ' '{print $2}')
-                internal_port=$(echo "$internal_part" | awk -F'/' '{print $1}')
-                protocol=$(echo "$internal_part" | awk -F'/' '{print $2}')
-                external_port=$(echo "$external_part" | awk -F':' '{print $2}')
+                internal_port=$(echo "$target_line" | awk -F' -> ' '{print $1}')
+                protocol=$(echo "$internal_port" | awk -F'/' '{print $2}')
+                internal_port=$(echo "$internal_port" | awk -F'/' '{print $1}')
+                external_port=$(echo "$target_line" | awk -F' -> ' '{print $2}' | awk -F':' '{print $NF}')
             fi
         fi
 
-        data+=("$name|$status_zh|$external_port|$internal_port|$protocol|$restart_zh")
+        data_rows+=("$name|$status_zh|$memory|$external_port|$internal_port|$protocol|$restart_zh")
+
+        # 更新最大寬度
+        local -a current_row_data=("$name" "$status_zh" "$memory" "$external_port" "$internal_port" "$protocol" "$restart_zh")
+        for i in "${!max_widths[@]}"; do
+            local current_width=$(display_width "${current_row_data[$i]}")
+            if [[ $current_width -gt ${max_widths[$i]} ]]; then
+                max_widths[$i]=$current_width
+            fi
+        done
     done <<< "$container_list"
 
-    # --- 第二步：進行表格化輸出 ---
+    # --- 階段二：格式化輸出 ---
+    # 輸出表頭
+    pad_left  "${headers[0]}" "${max_widths[0]}" && printf " "
+    pad_left  "${headers[1]}" "${max_widths[1]}" && printf " "
+    pad_right "${headers[2]}" "${max_widths[2]}" && printf " "
+    pad_right "${headers[3]}" "${max_widths[3]}" && printf " "
+    pad_right "${headers[4]}" "${max_widths[4]}" && printf " "
+    pad_left  "${headers[5]}" "${max_widths[5]}" && printf " "
+    pad_left  "${headers[6]}" "${max_widths[6]}" && printf "\n"
 
-    # 定義各欄位的緊湊寬度（為手機終端優化）
-    local name_col_width=$((max_name_len > 8 ? max_name_len : 8))   # 容器名最小8位
-    local status_col_width=8   # "狀態"緊湊版，剛好容納"運行中"
-    local ext_port_col_width=7 # "外部端口"縮短，數字通常不超過5位
-    local int_port_col_width=9 # "內部端口"縮短  
-    local proto_col_width=5    # "協議"緊湊版，tcp剛好
-    local restart_col_width=12 # "重啟策略"緊湊版
+    # 輸出分隔線
+    total_width=0
+    for width in "${max_widths[@]}"; do
+      total_width=$((total_width + width))
+    done
+    total_width=$((total_width + ${#max_widths[@]} - 1))
+    printf '%.0s-' $(seq 1 $total_width) && printf "\n"
 
-    # 計算字符串的顯示寬度（中文字符=2，英文字符=1）
-    display_width() {
-        local str="$1"
-        local width=0
-        local i=0
-        while [ $i -lt ${#str} ]; do
-            local char="${str:$i:1}"
-            # 檢查是否為多字節字符（簡單判斷）
-            if [ $(printf "%d" "'$char") -gt 127 ] 2>/dev/null; then
-                width=$((width + 2))
-            else
-                width=$((width + 1))
-            fi
-            i=$((i + 1))
-        done
-        echo $width
-    }
-
-    # 左對齊填充函數
-    pad_left() {
-        local text="$1"
-        local width="$2"
-        local current_width=$(display_width "$text")
-        local spaces=$((width - current_width))
-        if [ $spaces -gt 0 ]; then
-            printf "%s%*s" "$text" $spaces ""
-        else
-            printf "%-*.*s" $width $width "$text"
-        fi
-    }
-
-    # 右對齊填充函數  
-    pad_right() {
-        local text="$1"
-        local width="$2"
-        local current_width=$(display_width "$text")
-        local spaces=$((width - current_width))
-        if [ $spaces -gt 0 ]; then
-            printf "%*s%s" $spaces "" "$text"
-        else
-            printf "%*.*s" $width $width "$text"
-        fi
-    }
-
-    # 輸出表頭（使用單空格分隔符讓表格更緊湊）
-    pad_left "容器名" $name_col_width
-    printf " "
-    pad_left "狀態" $status_col_width  
-    printf " "
-    pad_right "外埠" $ext_port_col_width     # 簡化為"外埠"
-    printf " "
-    pad_right "內埠" $int_port_col_width     # 簡化為"內埠"
-    printf " "
-    pad_left "協議" $proto_col_width
-    printf " "
-    printf "重啟策略\n"
-
-    # 輸出分隔線（調整為單空格分隔符的總寬度）
-    local total_width=$((name_col_width + status_col_width + ext_port_col_width + int_port_col_width + proto_col_width + restart_col_width + 2))
-    printf '%.0s-' $(seq 1 $total_width)
-    printf "\n"
-
-    # 輸出數據行（使用單空格分隔符）
-    for row in "${data[@]}"; do
-        IFS='|' read -r name status_zh external_port internal_port protocol restart_zh <<< "$row"
+    # 輸出數據行
+    for row in "${data_rows[@]}"; do
+        IFS='|' read -r name status_zh memory external_port internal_port protocol restart_zh <<< "$row"
         
-        # 容器名（左對齊）
-        pad_left "$name" $name_col_width
-        printf " "
-        
-        # 狀態（左對齊）
-        pad_left "$status_zh" $status_col_width
-        printf " "
-        
-        # 外部端口（右對齊）
-        pad_right "$external_port" $ext_port_col_width
-        printf " "
-        
-        # 內部端口（右對齊）
-        pad_right "$internal_port" $int_port_col_width
-        printf " "
-        
-        # 協議（左對齊）
-        pad_left "$protocol" $proto_col_width
-        printf " "
-        
-        # 重啟策略
-        printf "%s\n" "$restart_zh"
+        pad_left  "$name"        "${max_widths[0]}" && printf " "
+        pad_left  "$status_zh"   "${max_widths[1]}" && printf " "
+        pad_right "$memory"      "${max_widths[2]}" && printf " "
+        pad_right "$external_port" "${max_widths[3]}" && printf " "
+        pad_right "$internal_port" "${max_widths[4]}" && printf " "
+        pad_left  "$protocol"    "${max_widths[5]}" && printf " "
+        pad_left  "$restart_zh"  "${max_widths[6]}" && printf "\n"
     done
 }
 
@@ -2023,6 +2104,55 @@ menu_docker_app(){
   done
 }
 
+toggle_docker_ipv6() {
+  local daemon="/etc/docker/daemon.json"
+  
+  # 2. 確保 daemon.json 存在且是有效的 JSON
+  if [ ! -f "$daemon" ]; then
+    mkdir -p /etc/docker
+    echo '{}' > "$daemon"
+    echo "已建立空的 $daemon 文件。"
+  elif ! jq empty "$daemon" &>/dev/null; then
+    echo '{}' > "$daemon"
+  fi
+
+  # 3. 偵測當前狀態並執行相反操作
+  # 我們使用 jq 來精確判斷 boolean 值，比 grep 更可靠
+  if jq -e '.ipv6 == true' "$daemon" &>/dev/null; then
+    # --- 當前已啟用 -> 執行禁用操作 ---
+    echo "偵測到 Docker IPv6 已啟用，現在將其禁用..."
+    
+    # 備份並使用 jq 刪除 ipv6 和 fixed-cidr-v6 鍵
+    cp "$daemon" "$daemon.bak_$(date +%s)"
+    local tmp=$(mktemp)
+    jq 'del(.ipv6, ."fixed-cidr-v6")' "$daemon" > "$tmp" && mv "$tmp" "$daemon"
+    
+    echo -e "${GREEN}成功從 $daemon 移除 IPv6 相關設定。${RESET}"
+
+  else
+    # --- 當前已禁用 -> 執行啟用操作 ---
+    echo "偵測到 Docker IPv6 已禁用，現在將其啟用..."
+
+    # 備份並使用 jq 添加 ipv6 和 fixed-cidr-v6 鍵
+    cp "$daemon" "$daemon.bak_$(date +%s)"
+    local tmp=$(mktemp)
+    jq '. + {"ipv6": true, "fixed-cidr-v6": "2001:db8:1::/64"}' "$daemon" > "$tmp" && mv "$tmp" "$daemon"
+
+    echo -e "${GREEN}成功在 $daemon 中啟用 IPv6。${RESET}"
+    echo "注意：已同時設定預設的 \"fixed-cidr-v6\"，您可稍後手動修改。"
+  fi
+
+  # 4. 重啟 Docker 服務
+  echo ""
+  echo "正在重啟 Docker 服務以套用變更..."
+  if service docker restart; then
+    echo -e "${GREEN}Docker 服務已成功重啟。${RESET}"
+  else
+    echo -e "${RED}Docker 服務重啟失敗，請使用 'journalctl -u docker.service' 查看詳細日誌。${RESET}"
+  fi
+}
+
+
 update_script() {
   local download_url="https://gitlab.com/gebu8f/sh/-/raw/main/docker/docker_mgr.sh"
   local temp_path="/tmp/docker_mgr.sh"
@@ -2092,11 +2222,13 @@ show_menu(){
   echo ""
   echo -e "${GREEN}12.${RESET} 調試 Docker 容器    ${GREEN}13.${RESET} Docker 換源工具(SuperManito開源作品) "
   echo ""
-  echo -e "${GREEN}14.${RESET} 編輯daemon.json文件【初學者慎用】"
+  echo -e "${GREEN}14.${RESET} 編輯daemon.json文件【初學者慎用】     ${GREEN}15.${RESET} 開啟/關閉ipv6"
+  echo ""
+  echo -e "${BLUE}r.${RESET} 解除安裝docker"
   echo ""
   echo -e "${BLUE}u.${RESET} 更新腳本             ${RED}0.${RESET} 離開"
   echo -e "${CYAN}-------------------${RESET}"
-  echo -en "${YELLOW}請選擇操作 [1-14 / u 0]: ${RESET}"
+  echo -en "${YELLOW}請選擇操作 [1-145/ u r 0]: ${RESET}"
 }
 case "$1" in
   --version|-V)
@@ -2190,8 +2322,16 @@ while true; do
     fi
     read -p "操作完成，請按任意鍵繼續..." -n1
     ;;
+  15)
+    toggle_docker_ipv6
+    read -p "操作完成，請按任意鍵繼續..." -n1
+    ;;
   0)
     echo "感謝使用。"
+    exit 0
+    ;;
+  r)
+    uninstall_docker
     exit 0
     ;;
   u)
