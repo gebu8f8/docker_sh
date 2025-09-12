@@ -2228,7 +2228,7 @@ show_menu(){
   echo ""
   echo -e "${BLUE}u.${RESET} 更新腳本             ${RED}0.${RESET} 離開"
   echo -e "${CYAN}-------------------${RESET}"
-  echo -en "${YELLOW}請選擇操作 [1-145/ u r 0]: ${RESET}"
+  echo -en "${YELLOW}請選擇操作 [1-15/ u r 0]: ${RESET}"
 }
 case "$1" in
   --version|-V)
