@@ -11,7 +11,7 @@ GRAY="\033[0;90m"
 RESET="\033[0m"
 
 #版本
-version="2.7.0"
+version="2.7.1"
 
 #檢查是否root權限
 if [ "$(id -u)" -ne 0 ]; then
@@ -470,27 +470,22 @@ docker_show_logs() {
   fi
 }
 
-
 docker_resource_manager() {
   # --- 通用排版輔助函式 ---
-  # 計算字串的視覺寬度 (中文=2, 英文=1)
   display_width() {
     local str="$1"
-    local width=0
-    local i=0
+    local width=0; local i=0
     while [ $i -lt ${#str} ]; do
       local char="${str:$i:1}"
-      if [[ $(printf "%d" "'$char") -gt 127 ]] 2>/dev/null; then
-        width=$((width + 2))
+      if [[ $(printf "%d" "'$char") -gt 127 ]] 2>/dev/null; then 
+        ((width+=2))
       else
-        width=$((width + 1))
+        ((width+=1))
       fi
-      i=$((i + 1))
+      ((i++))
     done
     echo $width
   }
-
-  # 左對齊填充
   pad_left() {
     local text="$1"
     local max_width="$2"
@@ -498,115 +493,90 @@ docker_resource_manager() {
     local padding=$((max_width - current_width))
     printf "%s%*s" "$text" $padding ""
   }
-
-  # 右對齊填充
-  pad_right() {
+  pad_right() { 
     local text="$1"
     local max_width="$2"
     local current_width=$(display_width "$text")
     local padding=$((max_width - current_width))
     printf "%*s%s" $padding "" "$text"
+    
   }
 
   while true; do
     echo -e "${CYAN} 正在讀取容器資源使用狀態...${RESET}"
 
-    # --- 效能優化: 一次性獲取所有資訊 ---
+    # --- 效能優化: 一次性批次獲取所有資訊 ---
     local all_containers_raw=$(docker ps -a --format "{{.Names}}|{{.ID}}")
     if [ -z "$all_containers_raw" ]; then
       echo -e "${GREEN} 沒有任何容器！${RESET}"
       return
     fi
-    local stats_data=$(docker stats --no-stream --format "{{.Name}}|{{.CPUPerc}}|{{.MemUsage}}")
     local all_ids=$(echo "$all_containers_raw" | cut -d'|' -f2 | tr '\n' ' ')
-    local inspect_data=$(docker inspect --format '{{.Name}}|{{.HostConfig.NanoCpus}}|{{.HostConfig.Memory}}' $all_ids 2>/dev/null)
 
-    # --- 排版處理核心：兩段式渲染 ---
-    
-    # --- 階段一：收集數據並計算各欄位最大寬度 ---
-    local headers=("編號" "容器名" "CPU (使用/限制)" "記憶體 (使用/限制)")
-    local -a max_widths=(
-      $(display_width "${headers[0]}")
-      $(display_width "${headers[1]}")
-      $(display_width "${headers[2]}")
-      $(display_width "${headers[3]}")
-    )
-
-    local container_info=()
-    local data_rows=()
-    local index=1
-
-    while IFS='|' read -r name id; do
-      # 儲存 ID 和 Name，供後續操作使用
-      container_info+=("$id|$name")
-
-      # 解析 inspect 資訊
-      local inspect_line=$(echo "$inspect_data" | grep "^/$name|")
-      IFS='|' read -r _ cpus mem <<< "$inspect_line"
-      
+    # 【快取1】預處理 Inspect 資訊 (CPU/Mem 限制)
+    declare -A cpu_limit_map; declare -A mem_limit_map
+    while IFS='|' read -r name cpus mem; do
+      local clean_name=$(echo "$name" | sed 's/^\///') # 移除 Name 前面的 /
       local cpu_limit="無限制"
       if ! [[ -z "$cpus" || "$cpus" == "0" || "$cpus" == "<no value>" ]]; then
         cpu_limit=$(awk -v nano="$cpus" 'BEGIN {printf "%.2f Cores", nano/1000000000}')
       fi
-      
+      cpu_limit_map["$clean_name"]="$cpu_limit"
+
       local mem_limit="無限制"
       if ! [[ -z "$mem" || "$mem" == "0" || "$mem" == "<no value>" ]]; then
-        mem_limit=$(awk -v mem="$mem" 'BEGIN {
-          if (mem >= 1073741824) printf "%.2fG", mem/1073741824;
-          else printf "%.2fM", mem/1048576;
-        }')
+        mem_limit=$(awk -v mem="$mem" 'BEGIN { if (mem >= 1073741824) printf "%.2fG", mem/1073741824; else printf "%.2fM", mem/1048576; }')
       fi
-      
-      # 解析 stats 資訊
-      local cpu_used="N/A"
-      local mem_used="N/A"
-      local stat_line=$(echo "$stats_data" | grep "^$name|")
-      if [ -n "$stat_line" ]; then
-        IFS='|' read -r _ s_cpu s_mem <<< "$stat_line"
-        cpu_used="$s_cpu"
-        mem_used=$(echo "$s_mem" | awk -F'/' '{print $1}' | xargs)
-      fi
+      mem_limit_map["$clean_name"]="$mem_limit"
+    done <<< $(docker inspect --format '{{.Name}}|{{.HostConfig.NanoCpus}}|{{.HostConfig.Memory}}' $all_ids 2>/dev/null)
+
+    # 【快取2】預處理 Stats 資訊 (CPU/Mem 使用量)
+    declare -A cpu_used_map; declare -A mem_used_map
+    while IFS='|' read -r name cpu_perc mem_usage; do
+      cpu_used_map["$name"]="$cpu_perc"
+      # 使用純 Bash 處理字串，避免 awk
+      local mem_val=${mem_usage%%/*}
+      mem_used_map["$name"]="${mem_val// /}" # 移除可能存在的空格
+    done <<< $(docker stats --no-stream --format "{{.Name}}|{{.CPUPerc}}|{{.MemUsage}}")
+
+    # --- 階段一：在 100% 純淨的迴圈中收集數據 ---
+    local headers=("編號" "容器名" "CPU (使用/限制)" "記憶體 (使用/限制)")
+    local -a max_widths=(); for header in "${headers[@]}"; do max_widths+=($(display_width "$header")); done
+
+    local container_info=(); local data_rows=(); local index=1
+    while IFS='|' read -r name id; do
+      container_info+=("$id|$name")
+
+      # 從快取中極速讀取數據
+      local cpu_limit=${cpu_limit_map["$name"]:-"無限制"}
+      local mem_limit=${mem_limit_map["$name"]:-"無限制"}
+      local cpu_used=${cpu_used_map["$name"]:-"N/A"}
+      local mem_used=${mem_used_map["$name"]:-"N/A"}
 
       local cpu_str="$cpu_used / $cpu_limit"
       local mem_str="$mem_used / $mem_limit"
 
-      # 將本行所有欄位的數據用 | 分隔後存入陣列
       data_rows+=("$index|$name|$cpu_str|$mem_str")
 
-      # 計算本行各欄位寬度，並更新最大寬度記錄
-      local -a current_widths=(
-        $(display_width "$index")
-        $(display_width "$name")
-        $(display_width "$cpu_str")
-        $(display_width "$mem_str")
-      )
+      local -a current_widths=($(display_width "$index") $(display_width "$name") $(display_width "$cpu_str") $(display_width "$mem_str"))
       for i in "${!max_widths[@]}"; do
         if [[ ${current_widths[$i]} -gt ${max_widths[$i]} ]]; then
           max_widths[$i]=${current_widths[$i]}
         fi
       done
-
-      index=$((index + 1))
+      ((index++))
     done <<< "$all_containers_raw"
 
-    # --- 階段二：使用計算好的最大寬度，進行格式化輸出 ---
+    # --- 階段二：格式化輸出 ---
     echo
-
-    # 輸出標頭
     pad_left  "${headers[0]}" "${max_widths[0]}" && printf "  "
     pad_left  "${headers[1]}" "${max_widths[1]}" && printf "  "
     pad_right "${headers[2]}" "${max_widths[2]}" && printf "  "
     pad_right "${headers[3]}" "${max_widths[3]}" && printf "\n"
 
-    # 輸出分隔線
-    total_width=0
-    for width in "${max_widths[@]}"; do
-      total_width=$((total_width + width))
-    done
-    total_width=$((total_width + (${#max_widths[@]} - 1) * 2)) # 加上欄位間的雙空格
-    printf '%.0s-' $(seq 1 $total_width) && printf "\n"
+    total_width=0; for width in "${max_widths[@]}"; do total_width=$((total_width + width)); done
+    total_width=$((total_width + (${#max_widths[@]} - 1) * 2)); printf '%.0s-' $(seq 1 $total_width); printf "\n"
 
-    # 輸出數據行
     for row in "${data_rows[@]}"; do
       IFS='|' read -r r_index r_name r_cpu r_mem <<< "$row"
       pad_left  "$r_index" "${max_widths[0]}" && printf "  "
@@ -626,44 +596,28 @@ docker_resource_manager() {
     1)
       read -p "請輸入欲修改 CPU 限制的容器編號: " num
       if ! [[ "$num" =~ ^[0-9]+$ ]] || [ "$num" -lt 1 ] || [ "$num" -ge "$index" ]; then
-        echo -e "${RED}無效編號${RESET}"
-        continue
-      fi
+        echo -e "${RED}無效編號${RESET}"; continue; fi
       IFS='|' read -r id name <<< "${container_info[$((num-1))]}"
-      read -p "請輸入新的 CPU 配額（例如 0.5 表示 0.5 Cores；輸入 0 表示無限制）: " cpu_limit
+      read -p "請輸入新的 CPU 配額（例如 0.5；輸入 0 表示無限制）: " cpu_limit
       docker update --cpus="$cpu_limit" "$id" > /dev/null
-      if [[ $? -eq 0 ]]; then
-        echo -e "${GREEN}容器 '$name' CPU 限制已更新${RESET}"
-      else
-        echo -e "${RED}更新失敗${RESET}"
-      fi
+      if [[ $? -eq 0 ]]; then echo -e "${GREEN}容器 '$name' CPU 限制已更新${RESET}"; else echo -e "${RED}更新失敗${RESET}"; fi
       ;;
     2)
       read -p "請輸入欲修改 記憶體 限制的容器編號: " num
       if ! [[ "$num" =~ ^[0-9]+$ ]] || [ "$num" -lt 1 ] || [ "$num" -ge "$index" ]; then
-        echo -e "${RED}無效編號${RESET}"
-        continue
-      fi
+        echo -e "${RED}無效編號${RESET}"; continue; fi
       IFS='|' read -r id name <<< "${container_info[$((num-1))]}"
-      read -p "請輸入新的記憶體限制（如 512m、1g，輸入 0 表示無限制）: " mem_limit
+      read -p "請輸入新的記憶體限制（如 512m、1g；輸入 0 表示無限制）: " mem_limit
       docker update --memory="$mem_limit" "$id" > /dev/null
-      if [[ $? -eq 0 ]]; then
-        echo -e "${GREEN}容器 '$name' 記憶體 限制已更新${RESET}"
-      else
-        echo -e "${RED}更新失敗${RESET}"
-      fi
+      if [[ $? -eq 0 ]]; then echo -e "${GREEN}容器 '$name' 記憶體 限制已更新${RESET}"; else echo -e "${RED}更新失敗${RESET}"; fi
       ;;
-    0)
-      echo -e "${CYAN}返回上一層${RESET}"
-      break
-      ;;
-    *)
-      echo -e "${RED}無效選項${RESET}"
-      ;;
+    0) echo -e "${CYAN}返回上一層${RESET}"; break;;
+    *) echo -e "${RED}無效選項${RESET}";;
     esac
     echo
   done
 }
+
 docker_volume_manager() {
   echo
   echo -e "${CYAN}當前 Docker 存儲卷使用情況（顯示宿主機路徑）：${RESET}"
@@ -1512,161 +1466,121 @@ restart_docker_container() {
 }
 
 show_docker_containers() {
-    # --- 通用排版輔助函式 ---
-    display_width() {
-        local str="$1"
-        local width=0
-        local i=0
-        while [ $i -lt ${#str} ]; do
-            local char="${str:$i:1}"
-            if [[ $(printf "%d" "'$char") -gt 127 ]] 2>/dev/null; then
-                width=$((width + 2))
-            else
-                width=$((width + 1))
-            fi
-            i=$((i + 1))
-        done
-        echo $width
-    }
+  # --- 通用排版輔助函式 ---
+  display_width() {
+    local str="$1"; local width=0; local i=0
+    while [ $i -lt ${#str} ]; do
+      local char="${str:$i:1}"
+      if [[ $(printf "%d" "'$char") -gt 127 ]] 2>/dev/null; then
+        width=$((width + 2))
+      else 
+        width=$((width + 1))
+      fi
+      i=$((i + 1))
+    done
+    echo $width
+  }
+  pad_left() {
+    local text="$1"
+    local max_width="$2"
+    local current_width=$(display_width "$text")
+    local padding=$((max_width - current_width))
+    printf "%s%*s" "$text" $padding ""
+  }
+  pad_right() {
+    local text="$1"
+    local max_width="$2"
+    local current_width=$(display_width "$text")
+    local padding=$((max_width - current_width))
+    printf "%*s%s" $padding "" "$text"
+  }
 
-    pad_left() {
-        local text="$1"
-        local max_width="$2"
-        local current_width=$(display_width "$text")
-        local padding=$((max_width - current_width))
-        printf "%s%*s" "$text" $padding ""
-    }
+  local container_list=$(docker ps -a --format "{{.Names}}|{{.ID}}")
+  if [ -z "$container_list" ]; then echo -e "${YELLOW} 沒有任何容器存在。${RESET}"
+    return
+  fi
+  local all_ids=$(echo "$container_list" | cut -d'|' -f2 | tr '\n' ' ')
+  declare -A status_map; declare -A restart_map
+  while IFS='|' read -r name status restart; do
+    status_map["$name"]="$status"
+    restart_map["$name"]="$restart"
+  done <<< $(docker inspect --format '{{.Name}}|{{.State.Status}}|{{.HostConfig.RestartPolicy.Name}}' $all_ids | sed 's/^\///')
 
-    pad_right() {
-        local text="$1"
-        local max_width="$2"
-        local current_width=$(display_width "$text")
-        local padding=$((max_width - current_width))
-        printf "%*s%s" $padding "" "$text"
-    }
+  declare -A port_map
+  while IFS='|' read -r name ports; do
+    port_map["$name"]="$ports"
+  done <<< $(docker ps -a --format "{{.Names}}|{{.Ports}}")
+  local headers=("容器名" "狀態" "外埠" "內埠" "協議" "重啟策略")
+  local -a max_widths=()
+  for header in "${headers[@]}"; do
+    max_widths+=($(display_width "$header"))
+  done
+  local data_rows=()
+  while IFS='|' read -r name id; do
+    # 從快取中極速讀取資訊
+    local status=${status_map["$name"]}
+    local restart=${restart_map["$name"]}
+    local raw_ports=${port_map["$name"]}
 
-    # --- 效能優化：批次獲取所有容器資訊 ---
-    local container_list=$(docker ps -a --format "{{.Names}}|{{.ID}}")
-
-    if [ -z "$container_list" ]; then
-        echo -e "\033[1;33m  沒有任何容器存在。\033[0m"
-        return
+    local status_zh
+    case "$status" in 
+    "running") status_zh="運行中";; 
+    "exited") status_zh="已停止";; 
+    "paused") status_zh="已暫停";; 
+    "created") status_zh="已建立";;
+    *) status_zh="$status";; 
+    esac
+    local restart_zh
+    case "$restart" in
+    "no") restart_zh="不重啟";;
+    "always") restart_zh="永遠重啟";;
+    "on-failure") restart_zh="錯誤時重啟";;
+    "unless-stopped") restart_zh="除手動停止外";;
+    *) restart_zh="-";;
+    esac
+    local external_port="-"; local internal_port="-"; local protocol="-"
+    if [[ -n "$raw_ports" && "$raw_ports" != " " ]]; then
+      local target_line=$(echo "$raw_ports" | tr ',' '\n' | grep '0.0.0.0:' | head -n 1) # 處理多端口情況，優先 TCP
+      if [ -n "$target_line" ]; then
+        internal_port=$(echo "$target_line" | awk -F'->' '{print $2}')
+        protocol=$(echo "$internal_port" | awk -F'/' '{print $2}')
+        internal_port=$(echo "$internal_port" | awk -F'/' '{print $1}')
+        external_port=$(echo "$target_line" | awk -F'->' '{print $1}' | awk -F':' '{print $NF}')
+      fi
     fi
-
-    # 一次性獲取所有容器的 ID
-    local all_ids=$(echo "$container_list" | cut -d'|' -f2 | tr '\n' ' ')
-
-    # 批次獲取 inspect 資訊並存入關聯陣列
-    declare -A status_map
-    declare -A restart_map
-    # Go 模板 {{json .}} 會輸出合法的 JSON，即使內容包含特殊字元
-    while IFS= read -r line; do
-        local name=$(echo "$line" | jq -r .Name | sed 's/^\///') # 移除 Name 前面的 /
-        local status=$(echo "$line" | jq -r .State.Status)
-        local restart=$(echo "$line" | jq -r .HostConfig.RestartPolicy.Name)
-        status_map["$name"]="$status"
-        restart_map["$name"]="$restart"
-    done <<< $(docker inspect $all_ids --format '{{json .}}')
-
-
-    # 批次獲取 stats 資訊 (只針對運行中容器)
-    declare -A mem_map
-    while IFS='|' read -r name mem_usage; do
-        mem_map["$name"]=$(echo "$mem_usage" | awk '{print $1}')
-    done <<< $(docker stats --no-stream --format "{{.Name}}|{{.MemUsage}}")
-
-    # --- 排版核心：兩段式渲染 ---
-    
-    # --- 階段一：收集數據並計算各欄位最大寬度 ---
-    local headers=("容器名" "狀態" "記憶體" "外埠" "內埠" "協議" "重啟策略")
-    local -a max_widths=()
-    for header in "${headers[@]}"; do
-        max_widths+=($(display_width "$header"))
+    data_rows+=("$name|$status_zh|$external_port|$internal_port|$protocol|$restart_zh")
+    # 更新最大寬度
+    local -a current_row_data=("$name" "$status_zh" "$external_port" "$internal_port" "$protocol" "$restart_zh")
+    for i in "${!max_widths[@]}"; do
+      local current_width=$(display_width "${current_row_data[$i]}")
+      if [[ $current_width -gt ${max_widths[$i]} ]]; then
+        max_widths[$i]=$current_width
+      fi
     done
+  done <<< "$container_list"
 
-    local data_rows=()
-    while IFS='|' read -r name id; do
-        # 從快取中讀取資訊
-        local status=${status_map["$name"]}
-        local restart=${restart_map["$name"]}
-        local memory=${mem_map["$name"]:-"N/A"} # 如果容器未運行，則無記憶體資訊
+  local header_line=""
+  header_line+=$(pad_left  "${headers[0]}" "${max_widths[0]}") && header_line+=" "
+  header_line+=$(pad_left  "${headers[1]}" "${max_widths[1]}") && header_line+=" "
+  header_line+=$(pad_right "${headers[2]}" "${max_widths[2]}") && header_line+=" "
+  header_line+=$(pad_right "${headers[3]}" "${max_widths[3]}") && header_line+=" "
+  header_line+=$(pad_left  "${headers[4]}" "${max_widths[4]}") && header_line+=" "
+  header_line+=$(pad_left  "${headers[5]}" "${max_widths[5]}")
+  echo "$header_line"
 
-        local status_zh
-        case "$status" in
-            "running") status_zh="運行中" ;;
-            "exited")  status_zh="已停止" ;;
-            "paused")  status_zh="已暫停" ;;
-            "created") status_zh="已建立" ;;
-            *)         status_zh="$status" ;;
-        esac
-
-        local restart_zh
-        case "$restart" in
-            "no")             restart_zh="不重啟" ;;
-            "always")         restart_zh="永遠重啟" ;;
-            "on-failure")     restart_zh="錯誤時重啟" ;;
-            "unless-stopped") restart_zh="除手動停止外" ;;
-            *)                restart_zh="-" ;;
-        esac
-
-        local external_port="-"
-        local internal_port="-"
-        local protocol="-"
-        
-        # docker port 依然需要單獨執行，但這是相對較快的操作
-        local raw_ports=$(docker port "$id")
-        if [ -n "$raw_ports" ]; then
-            local target_line=$(echo "$raw_ports" | head -n 1)
-            if [ -n "$target_line" ]; then
-                internal_port=$(echo "$target_line" | awk -F' -> ' '{print $1}')
-                protocol=$(echo "$internal_port" | awk -F'/' '{print $2}')
-                internal_port=$(echo "$internal_port" | awk -F'/' '{print $1}')
-                external_port=$(echo "$target_line" | awk -F' -> ' '{print $2}' | awk -F':' '{print $NF}')
-            fi
-        fi
-
-        data_rows+=("$name|$status_zh|$memory|$external_port|$internal_port|$protocol|$restart_zh")
-
-        # 更新最大寬度
-        local -a current_row_data=("$name" "$status_zh" "$memory" "$external_port" "$internal_port" "$protocol" "$restart_zh")
-        for i in "${!max_widths[@]}"; do
-            local current_width=$(display_width "${current_row_data[$i]}")
-            if [[ $current_width -gt ${max_widths[$i]} ]]; then
-                max_widths[$i]=$current_width
-            fi
-        done
-    done <<< "$container_list"
-
-    # --- 階段二：格式化輸出 ---
-    # 輸出表頭
-    pad_left  "${headers[0]}" "${max_widths[0]}" && printf " "
-    pad_left  "${headers[1]}" "${max_widths[1]}" && printf " "
-    pad_right "${headers[2]}" "${max_widths[2]}" && printf " "
-    pad_right "${headers[3]}" "${max_widths[3]}" && printf " "
-    pad_right "${headers[4]}" "${max_widths[4]}" && printf " "
-    pad_left  "${headers[5]}" "${max_widths[5]}" && printf " "
-    pad_left  "${headers[6]}" "${max_widths[6]}" && printf "\n"
-
-    # 輸出分隔線
-    total_width=0
-    for width in "${max_widths[@]}"; do
-      total_width=$((total_width + width))
-    done
-    total_width=$((total_width + ${#max_widths[@]} - 1))
-    printf '%.0s-' $(seq 1 $total_width) && printf "\n"
-
-    # 輸出數據行
-    for row in "${data_rows[@]}"; do
-        IFS='|' read -r name status_zh memory external_port internal_port protocol restart_zh <<< "$row"
-        
-        pad_left  "$name"        "${max_widths[0]}" && printf " "
-        pad_left  "$status_zh"   "${max_widths[1]}" && printf " "
-        pad_right "$memory"      "${max_widths[2]}" && printf " "
-        pad_right "$external_port" "${max_widths[3]}" && printf " "
-        pad_right "$internal_port" "${max_widths[4]}" && printf " "
-        pad_left  "$protocol"    "${max_widths[5]}" && printf " "
-        pad_left  "$restart_zh"  "${max_widths[6]}" && printf "\n"
-    done
+  total_width=$(display_width "$header_line")
+  printf '%.0s-' $(seq 1 $total_width) && printf "\n"
+  for row in "${data_rows[@]}"; do
+    IFS='|' read -r name status_zh external_port internal_port protocol restart_zh <<< "$row"
+    local data_line=""
+    data_line+=$(pad_left  "$name"        "${max_widths[0]}") && data_line+=" "
+    data_line+=$(pad_left  "$status_zh"   "${max_widths[1]}") && data_line+=" "
+    data_line+=$(pad_right "$external_port" "${max_widths[2]}") && data_line+=" "
+    data_line+=$(pad_right "$internal_port" "${max_widths[3]}") && data_line+=" "
+    data_line+=$(pad_left  "$protocol"    "${max_widths[4]}") && data_line+=" "
+    data_line+=$(pad_left  "$restart_zh"  "${max_widths[5]}")
+    echo "$data_line"
+  done
 }
 
 start_docker_container() {
