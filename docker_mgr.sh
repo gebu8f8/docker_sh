@@ -11,7 +11,7 @@ GRAY="\033[0;90m"
 RESET="\033[0m"
 
 #版本
-version="2.7.1"
+version="2.7.2"
 
 #檢查是否root權限
 if [ "$(id -u)" -ne 0 ]; then
@@ -1064,7 +1064,6 @@ install_docker_and_compose() {
   else
     echo -e "${GREEN}已安裝 Docker${RESET}"
   fi
- -------------------
   # 檢查 Docker Compose (v1 或 v2 plugin) 是否已安裝
   if ! command -v docker-compose &>/dev/null && ! docker compose version &>/dev/null; then
     echo "準備安裝 Docker Compose Plugin..."
