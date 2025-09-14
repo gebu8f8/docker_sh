@@ -11,7 +11,7 @@ GRAY="\033[0;90m"
 RESET="\033[0m"
 
 #版本
-version="2.7.2"
+version="2.8.0"
 
 #檢查是否root權限
 if [ "$(id -u)" -ne 0 ]; then
@@ -619,74 +619,237 @@ docker_resource_manager() {
 }
 
 docker_volume_manager() {
+  # --- 通用排版輔助函式 (已展開，提高可讀性) ---
+  display_width() {
+    local str="$1"
+    local width=0
+    local i=0
+    while [ $i -lt ${#str} ]; do
+      local char="${str:$i:1}"
+      if [[ $(printf "%d" "'$char") -gt 127 ]] 2>/dev/null; then
+        ((width+=2))
+      else
+        ((width+=1))
+      fi
+      ((i++))
+    done
+    echo $width
+  }
+
+  pad_left() {
+    local text="$1"
+    local max_width="$2"
+    local current_width=$(display_width "$text")
+    local padding=$((max_width - current_width))
+    printf "%s%*s" "$text" "$padding" ""
+  }
+
+  # --- 效能優化：一次性批次獲取所有資訊 ---
+  local all_containers_raw
+  all_containers_raw=$(docker ps -a --format "{{.Names}}|{{.ID}}")
+
+  local all_volumes_json
+  all_volumes_json=$(docker volume inspect $(docker volume ls -q) 2>/dev/null)
+
+  # 【快取1】預處理所有 Volumes 的資訊 (名稱 -> 路徑)
+  declare -A volume_path_map
+  if [[ -n "$all_volumes_json" ]]; then
+    # 使用 jq 將 JSON 陣列轉換為多行，每行一個 JSON 物件
+    while IFS= read -r vol_data; do
+      local name=$(echo "$vol_data" | jq -r .Name)
+      local mountpoint=$(echo "$vol_data" | jq -r .Mountpoint)
+      volume_path_map["$name"]="$mountpoint"
+    done <<< $(echo "$all_volumes_json" | jq -c '.[]')
+  fi
+  
+  # 【快取2】處理容器的掛載資訊
+  local bind_mount_rows=()
+  local volume_mount_rows=()
+  declare -A used_volumes
+  
+  if [[ -n "$all_containers_raw" ]]; then
+    while IFS='|' read -r name id; do
+      local clean_name=$(echo "$name" | sed 's/^\///')
+      local mounts_json=$(docker inspect --format '{{json .Mounts}}' "$id")
+
+      while IFS= read -r mount; do
+        local type=$(echo "$mount" | jq -r .Type)
+        if [[ "$type" == "bind" ]]; then
+          local source=$(echo "$mount" | jq -r .Source)
+          local destination=$(echo "$mount" | jq -r .Destination)
+          bind_mount_rows+=("$clean_name|$source|$destination")
+        elif [[ "$type" == "volume" ]]; then
+          local volume_name=$(echo "$mount" | jq -r .Name)
+          local path=${volume_path_map["$volume_name"]}
+          volume_mount_rows+=("$clean_name|$path") # 只儲存路徑，不再儲存名稱
+          used_volumes["$volume_name"]=1
+        fi
+      done <<< $(echo "$mounts_json" | jq -c '.[]')
+    done <<< "$all_containers_raw"
+  fi
+
+  # --- 面板一：綁定掛載 (Bind Mounts) ---
   echo
-  echo -e "${CYAN}當前 Docker 存儲卷使用情況（顯示宿主機路徑）：${RESET}"
-
-  # 準備表格資料
-  local data=()
-  local volumes=$(docker volume ls -q)
-
-  if [ -z "$volumes" ]; then
-    echo -e "${YELLOW}  尚無任何存儲卷。${RESET}"
+  echo -e "${CYAN}綁定掛載 (Host Folders)：${RESET}"
+  if [ ${#bind_mount_rows[@]} -eq 0 ]; then
+    echo -e "${YELLOW}  沒有任何容器使用綁定掛載。${RESET}"
   else
-    for vol in $volumes; do
-      # 查所有容器掛載此卷
-      local containers=$(docker ps -a -q)
-      local found=false
-      for cid in $containers; do
-        # 看容器是否有掛此 volume，並取出 Source（宿主機路徑）
-        local mount=$(docker inspect -f '{{range .Mounts}}{{if eq .Name "'"$vol"'"}}{{.Source}}{{end}}{{end}}' "$cid")
-        if [ -n "$mount" ]; then
-          local cname=$(docker inspect -f '{{.Name}}' "$cid" | sed 's|/||')
-          data+=("$cname|$vol|$mount")
-          found=true
+    local headers=("容器" "主機路徑" "容器內路徑")
+    local -a max_widths=(0 0 0)
+    for h_idx in "${!headers[@]}"; do
+      max_widths[$h_idx]=$(display_width "${headers[$h_idx]}")
+    done
+
+    for row in "${bind_mount_rows[@]}"; do
+      IFS='|' read -r cname src dest <<< "$row"
+      local -a widths=($(display_width "$cname") $(display_width "$src") $(display_width "$dest"))
+      for i in 0 1 2; do
+        if [[ ${widths[$i]} -gt ${max_widths[$i]} ]]; then
+          max_widths[$i]=${widths[$i]}
         fi
       done
-      # 若沒被任何容器掛載，也顯示出空列
-      if [ "$found" = false ]; then
-        data+=("（未掛載）|$vol|")
-      fi
     done
-    # 印出表頭
-    local col1="容器名"
-    local col2="存儲卷名"
-    local col3="宿主機路徑"
-
-    # 計算補空格（每個中文字寬度視為2）
-    printf "%-20s %-25s %-40s\n" \
-      "$col1$(printf '%*s' $((20 - ${#col1} * 2)) '')" \
-      "$col2$(printf '%*s' $((25 - ${#col2} * 2)) '')" \
-      "$col3$(printf '%*s' $((40 - ${#col3} * 2)) '')"
-    printf "%s\n" "-------------------------------------------------------------------------------------------------------------"
-
-    for row in "${data[@]}"; do
-      IFS='|' read -r cname vol path <<< "$row"
-      printf "%-20s %-25s %-40s\n" "$cname" "$vol" "${path:-""}"
+    
+    pad_left "${headers[0]}" "${max_widths[0]}"; printf "  "
+    pad_left "${headers[1]}" "${max_widths[1]}"; printf "  "
+    pad_left "${headers[2]}" "${max_widths[2]}"; printf "\n"
+    
+    total_width=0
+    for w in "${max_widths[@]}"; do total_width=$((total_width + w)); done
+    total_width=$((total_width + 4)); printf '%.0s-' $(seq 1 $total_width); printf "\n"
+    
+    for row in "${bind_mount_rows[@]}"; do
+      IFS='|' read -r cname src dest <<< "$row"
+      pad_left "$cname" "${max_widths[0]}"; printf "  "
+      pad_left "$src"   "${max_widths[1]}"; printf "  "
+      pad_left "$dest"  "${max_widths[2]}"; printf "\n"
     done
   fi
 
+  echo
+  total_width=$((total_width + 4)); printf '%.0s-' $(seq 1 $total_width); printf "\n"
+
+  # --- 面板二：儲存卷 (Volumes) ---
+  echo
+  echo -e "${CYAN}儲存卷 (Managed by Docker)：${RESET}"
+  if [ ${#volume_path_map[@]} -eq 0 ]; then
+    echo -e "${YELLOW}  沒有任何儲存卷存在。${RESET}"
+  else
+    local headers=("容器" "宿主機路徑")
+    local -a max_widths=(0 0)
+    for h_idx in "${!headers[@]}"; do
+      max_widths[$h_idx]=$(display_width "${headers[$h_idx]}")
+    done
+
+    for row in "${volume_mount_rows[@]}"; do
+      IFS='|' read -r cname path <<< "$row"
+      local -a widths=($(display_width "$cname") $(display_width "$path"))
+      if [[ ${widths[0]} -gt ${max_widths[0]} ]]; then max_widths[0]=${widths[0]}; fi
+      if [[ ${widths[1]} -gt ${max_widths[1]} ]]; then max_widths[1]=${widths[1]}; fi
+    done
+
+    local orphan_width=$(display_width "（未掛載）")
+    if [[ $orphan_width -gt ${max_widths[0]} ]]; then max_widths[0]=$orphan_width; fi
+    for vol_name in "${!volume_path_map[@]}"; do
+      if [[ -z "${used_volumes[$vol_name]}" ]]; then
+        local path=${volume_path_map["$vol_name"]}
+        local path_width=$(display_width "$path")
+        if [[ $path_width -gt ${max_widths[1]} ]]; then max_widths[1]=$path_width; fi
+      fi
+    done
+    
+    pad_left "${headers[0]}" "${max_widths[0]}"; printf "  "
+    pad_left "${headers[1]}" "${max_widths[1]}"; printf "\n"
+
+    total_width=0
+    for w in "${max_widths[@]}"; do total_width=$((total_width + w)); done
+    total_width=$((total_width + 2)); printf '%.0s-' $(seq 1 $total_width); printf "\n"
+    
+    for row in "${volume_mount_rows[@]}"; do
+      IFS='|' read -r cname path <<< "$row"
+      pad_left "$cname" "${max_widths[0]}"; printf "  "
+      pad_left "$path"  "${max_widths[1]}"; printf "\n"
+    done
+    for vol_name in "${!volume_path_map[@]}"; do
+      if [[ -z "${used_volumes[$vol_name]}" ]]; then
+        local path=${volume_path_map["$vol_name"]}
+        pad_left "（未掛載）" "${max_widths[0]}"; printf "  "
+        pad_left "$path"      "${max_widths[1]}"; printf "\n"
+      fi
+    done
+  fi
+
+  # --- 後續管理功能 ---
   echo
   echo "存儲卷管理功能："
   echo "1. 添加卷"
   echo "2. 刪除卷"
   echo "0. 返回"
   echo
-
   read -p "請選擇功能 [0-2]：" choice
-
   case "$choice" in
   1)
-    echo " 添加新存儲卷"
-    read -p "請輸入存儲卷名稱：" volname
-    docker volume create "$volname"
-    echo -e "${GREEN} 存儲卷 $volname 已建立。${RESET}"
+    echo " 添加新儲存卷"
+    read -p "請輸入儲存卷名稱：" volname
+    if [ -n "$volname" ]; then
+        docker volume create "$volname"
+        echo -e "${GREEN} 存儲卷 $volname 已建立。${RESET}"
+    else
+        echo -e "${RED}名稱不能為空。${RESET}"
+    fi
     ;;
-  2)
-    echo " 刪除存儲卷"
-    docker volume ls --format '{{.Name}}' | nl
-    read -p "請輸入欲刪除的存儲卷名稱：" volname
-    docker volume rm "$volname"
-    echo -e "${GREEN}存儲卷 $volname 已刪除。${RESET}"
+    2)
+    echo " 刪除儲存卷"
+    
+    # 步驟1：將所有 volume 名稱讀入一個陣列
+    local volumes_array=()
+    mapfile -t volumes_array < <(docker volume ls -q)
+
+    # 檢查是否有任何 volume
+    if [ ${#volumes_array[@]} -eq 0 ]; then
+      echo -e "${YELLOW}  沒有任何可刪除的存儲卷。${RESET}"
+    else
+      echo "請選擇要刪除的存儲卷編號："
+      
+      # 步驟2：格式化並截斷顯示
+      for i in "${!volumes_array[@]}"; do
+        local vol_name="${volumes_array[$i]}"
+        local display_name="$vol_name"
+        # 如果名稱長度超過 60（通常是自動生成的），就截斷它
+        if [ ${#display_name} -gt 60 ]; then
+          display_name="${display_name:0:12}...${display_name: -4}" # 顯示前12位和後4位
+        fi
+        printf "  %2d) %s\n" "$((i + 1))" "$display_name"
+      done
+      
+      # 步驟3：讓使用者輸入編號
+      read -p "請輸入欲刪除的存儲卷編號 (輸入 0 取消)：" num
+
+      # 步驟4：驗證輸入並映射回完整名稱
+      if [[ "$num" =~ ^[0-9]+$ ]] && [ "$num" -gt 0 ] && [ "$num" -le "${#volumes_array[@]}" ]; then
+        # 索引是編號減 1
+        local volname_to_delete="${volumes_array[$((num - 1))]}"
+        
+        # 步驟5：執行刪除
+        echo -e "${YELLOW}即將刪除：${volname_to_delete}${RESET}"
+        read -p "請確認 (y/N): " confirm
+        if [[ "$confirm" =~ ^[yY]$ ]]; then
+            docker volume rm "$volname_to_delete"
+            if [ $? -eq 0 ]; then
+                echo -e "${GREEN}存儲卷 $volname_to_delete 已刪除。${RESET}"
+            else
+                # Docker 會返回具體的錯誤，直接顯示即可
+                echo -e "${RED}刪除失敗。${RESET}" 
+            fi
+        else
+            echo "操作已取消。"
+        fi
+      elif [[ "$num" == "0" ]]; then
+        echo "操作已取消。"
+      else
+        echo -e "${RED}無效的編號。${RESET}"
+      fi
+    fi
     ;;
   0)
     echo "已返回"
