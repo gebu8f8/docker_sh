@@ -11,7 +11,7 @@ GRAY="\033[0;90m"
 RESET="\033[0m"
 
 #版本
-version="2.8.0"
+version="2.8.1"
 
 #檢查是否root權限
 if [ "$(id -u)" -ne 0 ]; then
@@ -513,22 +513,32 @@ docker_resource_manager() {
     fi
     local all_ids=$(echo "$all_containers_raw" | cut -d'|' -f2 | tr '\n' ' ')
 
-    # 【快取1】預處理 Inspect 資訊 (CPU/Mem 限制)
+        # 【快取1】預處理 Inspect 資訊 (CPU/Mem 限制)
     declare -A cpu_limit_map; declare -A mem_limit_map
-    while IFS='|' read -r name cpus mem; do
-      local clean_name=$(echo "$name" | sed 's/^\///') # 移除 Name 前面的 /
+    # 【關鍵修正】: 一次性獲取所有 CPU 相關的欄位
+    local inspect_data=$(docker inspect --format '{{.Name}}|{{.HostConfig.NanoCpus}}|{{.HostConfig.CpuPeriod}}|{{.HostConfig.CpuQuota}}|{{.HostConfig.Memory}}' $all_ids 2>/dev/null)
+    
+    while IFS='|' read -r name nano_cpus cpu_period cpu_quota mem; do
+      local clean_name=$(echo "$name" | sed 's/^\///')
+      
+      # --- 更聰明的 CPU 限制判斷邏輯 ---
       local cpu_limit="無限制"
-      if ! [[ -z "$cpus" || "$cpus" == "0" || "$cpus" == "<no value>" ]]; then
-        cpu_limit=$(awk -v nano="$cpus" 'BEGIN {printf "%.2f Cores", nano/1000000000}')
+      if [[ -n "$nano_cpus" && "$nano_cpus" != "0" && "$nano_cpus" != "<no value>" ]]; then
+        # 優先使用新的 NanoCpus
+        cpu_limit=$(awk -v nano="$nano_cpus" 'BEGIN {printf "%.2f Cores", nano/1000000000}')
+      elif [[ -n "$cpu_period" && "$cpu_period" != "0" && "$cpu_period" != "<no value>" && -n "$cpu_quota" && "$cpu_quota" -gt 0 ]]; then
+        # 其次，檢查舊的 Period/Quota
+        cpu_limit=$(awk -v period="$cpu_period" -v quota="$cpu_quota" 'BEGIN {printf "%.2f Cores", quota/period}')
       fi
       cpu_limit_map["$clean_name"]="$cpu_limit"
 
+      # --- 記憶體限制邏輯保持不變 ---
       local mem_limit="無限制"
       if ! [[ -z "$mem" || "$mem" == "0" || "$mem" == "<no value>" ]]; then
         mem_limit=$(awk -v mem="$mem" 'BEGIN { if (mem >= 1073741824) printf "%.2fG", mem/1073741824; else printf "%.2fM", mem/1048576; }')
       fi
       mem_limit_map["$clean_name"]="$mem_limit"
-    done <<< $(docker inspect --format '{{.Name}}|{{.HostConfig.NanoCpus}}|{{.HostConfig.Memory}}' $all_ids 2>/dev/null)
+    done <<< "$inspect_data"
 
     # 【快取2】預處理 Stats 資訊 (CPU/Mem 使用量)
     declare -A cpu_used_map; declare -A mem_used_map
