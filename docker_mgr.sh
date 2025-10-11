@@ -11,7 +11,7 @@ GRAY="\033[0;90m"
 RESET="\033[0m"
 
 #版本
-version="2.8.1"
+version="2.9.0"
 
 #檢查是否root權限
 if [ "$(id -u)" -ne 0 ]; then
@@ -127,8 +127,6 @@ check_site_proxy_domain(){
 }
 
 delete_docker_containers() {
-  echo "正在讀取所有容器..."
-
   local all_containers=$(docker ps -a --format "{{.ID}}|{{.Names}}|{{.Status}}|{{.Image}}")
 
   if [ -z "$all_containers" ]; then
@@ -151,20 +149,21 @@ delete_docker_containers() {
 
   for i in $input_indexes; do
     if ! [[ "$i" =~ ^[0-9]+$ ]]; then
-      echo -e "${RED} 無效編號：$i${RESET}"
+      echo -e "${RED} 無效編號：$i${RESET}" >&2
       continue
     fi
     if [ "$i" -ge 1 ] && [ "$i" -lt "$index" ]; then
       IFS='|' read -r id name status image <<< "${containers_list[$((i-1))]}"
         selected_ids+=("$id|$name|$status|$image")
     else
-      echo -e "${RED}編號 $i 不存在！${RESET}"
+      echo -e "${RED}編號 $i 不存在！${RESET}"  >&2
     fi
   done
 
   if [ ${#selected_ids[@]} -eq 0 ]; then
-    echo "${RED} 沒有選擇任何有效容器，操作中止。${RESET}"
-    return
+    echo "${RED} 沒有選擇任何有效容器，操作中止。${RESET}" >&2
+    sleep 1
+    return 0
   fi
 
   for info in "${selected_ids[@]}"; do
@@ -174,28 +173,36 @@ delete_docker_containers() {
 
     # 若容器正在運行，先停止
     if [[ "$status" =~ ^Up ]]; then
-      echo "容器正在運行，先停止..."
-      docker stop "$id"
-    fi
-
-    # 刪除容器
-    if docker rm "$id"; then
-      echo -e ${GREEN}"容器 $name 已刪除${RESET}"
-      # 詢問是否刪除鏡像
-      read -p "是否同時刪除鏡像 $image？ (y/n) " delete_image
-      if [[ "$delete_image" =~ ^[Yy]$ ]]; then
-        if docker rmi "$image" ; then
-          echo -e "${GREEN}鏡像 $image 已刪除${RESET}"
-        else
-          echo -e "${RED}鏡像 $image 刪除失敗或已被其他容器使用${RESET}"
-        fi
+      if docker stop "$id"; then
+        docker rm "$id" || {
+          echo -e ${RED}"容器 $name 刪除失敗${RESET}" >&2
+          sleep 2
+          return 1
+        }
+      else
+        docker rm -f "$id"
       fi
     else
-      echo -e "${RED}容器 $name 刪除失敗${RESET}"
+      docker rm "$id" || {
+        echo -e ${RED}"容器 $name 刪除失敗${RESET}" >&2
+        sleep 2
+        return 1
+      }
     fi
-    echo
+    read -p "是否同時刪除鏡像 $image？ (y/n) [預設：y]" delete_image
+    delete_image=${delete_image,,}
+    delete_image=${delete_image:-y}
+    if [[ "$delete_image" == y ]]; then
+      if docker rmi "$image" ; then
+        echo -e "${GREEN}鏡像 $image 已刪除${RESET}"
+      else
+        echo -e "${YELLOW}鏡像 $image 刪除失敗或已被其他容器使用${RESET}" >&2
+        sleep 1
+      fi
+    else
+      echo -e "${RED}容器 $name 跳過刪除鏡像{RESET}" >&2
+    fi
   done
-  echo -e "${GREEN}操作完成${RESET}"
 }
 
 docker_network_manager() {
@@ -1220,11 +1227,8 @@ install_docker_app() {
 }
 
 install_docker_and_compose() {
-  echo "正在檢查 Docker 是否已安裝..."
-
   # 安裝 Docker
   if ! command -v docker &>/dev/null; then
-    echo "安裝 Docker 中..."
 
     if [ "$system" -eq 1 ] || [ "$system" -eq 2 ]; then
       # 使用官方腳本安裝
@@ -1233,36 +1237,28 @@ install_docker_and_compose() {
       # Alpine Linux
       apk add docker
     fi
-    echo -e "${GREEN}Docker 安裝完成${RESET}"
-  else
-    echo -e "${GREEN}已安裝 Docker${RESET}"
   fi
   # 檢查 Docker Compose (v1 或 v2 plugin) 是否已安裝
   if ! command -v docker-compose &>/dev/null && ! docker compose version &>/dev/null; then
-    echo "準備安裝 Docker Compose Plugin..."
 
     # 對於 Debian/Ubuntu/CentOS 系統，我們需要手動安裝
     if [ "$system" -eq 1 ] || [ "$system" -eq 2 ]; then
-      echo "正在從 GitHub API 獲取最新的 Docker Compose 版本..."
       # 使用 GitHub API 獲取最新的 release tag name
       local LATEST_COMPOSE_VERSION=$(curl -s https://api.github.com/repos/docker/compose/releases/latest | jq -r .tag_name)
 
       if [ -z "$LATEST_COMPOSE_VERSION" ] || [ "$LATEST_COMPOSE_VERSION" == "null" ]; then
-        echo -e "${RED}無法獲取最新的 Docker Compose 版本號。請檢查您的網路連線或稍後再試。${RESET}"
-        return 1
+        echo -e "${RED}無法獲取最新的 Docker Compose 版本號。請檢查您的網路連線或稍後再試。${RESET}" >&2
+        sleep 3
+        exit 1
       fi
-      
-      echo -e "最新的 Docker Compose 版本是: ${GREEN}$LATEST_COMPOSE_VERSION${RESET}"
-      echo "開始下載..."
-
       local DOCKER_CONFIG=${DOCKER_CONFIG:-/usr/local/lib/docker}
       mkdir -p "$DOCKER_CONFIG/cli-plugins"
       
       # 使用獲取到的最新版本號來下載
       if ! curl -SL "https://github.com/docker/compose/releases/download/${LATEST_COMPOSE_VERSION}/docker-compose-linux-$(uname -m)" -o "$DOCKER_CONFIG/cli-plugins/docker-compose" ; then
-        echo -e "${RED}Docker Compose 下載失敗。${RESET}"
-        sleep 1
-        return 1
+        echo -e "${RED}Docker Compose 下載失敗。${RESET}" >&2
+        sleep 3
+        exit 1
       fi
 
       chmod +x "$DOCKER_CONFIG/cli-plugins/docker-compose"
@@ -1273,34 +1269,27 @@ install_docker_and_compose() {
     fi
 
     # 驗證安裝
-    if docker compose version &>/dev/null; then
-      echo -e "${GREEN}Docker Compose 安裝完成，版本: $(docker compose version --short)${RESET}"
-    else
-      echo -e "${RED}Docker Compose 安裝失敗，請手動檢查。${RESET}"
+    if ! docker compose version &>/dev/null; then
+      echo -e "${RED}Docker Compose 安裝失敗，請手動檢查。${RESET}" >&2
+      sleep 3
+      exit 1
     fi
-  else
-    echo -e "${GREEN}已安裝 Docker Compose${RESET}"
   fi
-  # ------------------- 修改結束 -------------------
 
   # 啟用與開機自啟
   if [ "$system" -eq 1 ] || [ "$system" -eq 2 ]; then
     if ! systemctl is-enabled docker &>/dev/null; then
       systemctl enable docker
-      echo -e "${GREEN}已設定 Docker 開機自啟${RESET}"
     fi
     if ! systemctl is-active docker &>/dev/null; then
       systemctl start docker
-      echo -e "${GREEN}已啟動 Docker 服務${RESET}"
     fi
   elif [ "$system" -eq 3 ]; then
     if ! rc-update show | grep -q docker; then
       rc-update add docker default
-      echo -e "${GREEN}已設定 Docker 開機自啟${RESET}"
     fi
     if ! service docker status | grep -q running; then
         service docker start
-        echo -e "${GREEN}已啟動 Docker 服務${RESET}"
       fi
   fi
 }
@@ -1638,7 +1627,7 @@ restart_docker_container() {
 }
 
 show_docker_containers() {
-  # --- 通用排版輔助函式 ---
+  # --- 通用排版輔助函式 (完全同您的原始碼) ---
   display_width() {
     local str="$1"; local width=0; local i=0
     while [ $i -lt ${#str} ]; do
@@ -1667,90 +1656,118 @@ show_docker_containers() {
     printf "%*s%s" $padding "" "$text"
   }
 
+  if ! command -v docker &>/dev/null; then echo -e "${RED}Docker 未安裝或未運行。${RESET}"; return 1; fi
+
+  # --- 資訊獲取 (完全同您的原始碼) ---
   local container_list=$(docker ps -a --format "{{.Names}}|{{.ID}}")
-  if [ -z "$container_list" ]; then echo -e "${YELLOW} 沒有任何容器存在。${RESET}"
-    return
-  fi
+  if [ -z "$container_list" ]; then echo -e "${YELLOW} 沒有任何容器存在。${RESET}"; return 0; fi
+  
   local all_ids=$(echo "$container_list" | cut -d'|' -f2 | tr '\n' ' ')
   declare -A status_map; declare -A restart_map
-  while IFS='|' read -r name status restart; do
-    status_map["$name"]="$status"
-    restart_map["$name"]="$restart"
-  done <<< $(docker inspect --format '{{.Name}}|{{.State.Status}}|{{.HostConfig.RestartPolicy.Name}}' $all_ids | sed 's/^\///')
+  local inspect_output
+  inspect_output=$(docker inspect --format '{{.Name}}|{{.State.Status}}|{{.HostConfig.RestartPolicy.Name}}' $all_ids 2>/dev/null | sed 's/^\///')
+  if [[ -n "$inspect_output" ]]; then
+    while IFS='|' read -r name status restart; do
+      status_map["$name"]="$status"
+      restart_map["$name"]="$restart"
+    done <<< "$inspect_output"
+  fi
 
   declare -A port_map
   while IFS='|' read -r name ports; do
     port_map["$name"]="$ports"
   done <<< $(docker ps -a --format "{{.Names}}|{{.Ports}}")
+  
+  # --- 渲染準備 ---
   local headers=("容器名" "狀態" "外埠" "內埠" "協議" "重啟策略")
   local -a max_widths=()
-  for header in "${headers[@]}"; do
-    max_widths+=($(display_width "$header"))
-  done
-  local data_rows=()
+  for header in "${headers[@]}"; do max_widths+=($(display_width "$header")); done
+  
+  local -a data_rows
+  
+  # --- 核心 bug 修正 ---
   while IFS='|' read -r name id; do
-    # 從快取中極速讀取資訊
     local status=${status_map["$name"]}
     local restart=${restart_map["$name"]}
     local raw_ports=${port_map["$name"]}
 
-    local status_zh
-    case "$status" in 
-    "running") status_zh="運行中";; 
-    "exited") status_zh="已停止";; 
-    "paused") status_zh="已暫停";; 
-    "created") status_zh="已建立";;
-    *) status_zh="$status";; 
-    esac
-    local restart_zh
-    case "$restart" in
-    "no") restart_zh="不重啟";;
-    "always") restart_zh="永遠重啟";;
-    "on-failure") restart_zh="錯誤時重啟";;
-    "unless-stopped") restart_zh="除手動停止外";;
-    *) restart_zh="-";;
-    esac
-    local external_port="-"; local internal_port="-"; local protocol="-"
-    if [[ -n "$raw_ports" && "$raw_ports" != " " ]]; then
-      local target_line=$(echo "$raw_ports" | tr ',' '\n' | grep '0.0.0.0:' | head -n 1) # 處理多端口情況，優先 TCP
-      if [ -n "$target_line" ]; then
-        internal_port=$(echo "$target_line" | awk -F'->' '{print $2}')
-        protocol=$(echo "$internal_port" | awk -F'/' '{print $2}')
-        internal_port=$(echo "$internal_port" | awk -F'/' '{print $1}')
-        external_port=$(echo "$target_line" | awk -F'->' '{print $1}' | awk -F':' '{print $NF}')
-      fi
+    local status_zh; case "$status" in "running") status_zh="運行中";; "exited") status_zh="已停止";; "paused") status_zh="已暫停";; "created") status_zh="已建立";; *) status_zh="$status";; esac
+    local restart_zh; case "$restart" in "no") restart_zh="不重啟";; "always") restart_zh="永遠重啟";; "on-failure") restart_zh="錯誤時重啟";; "unless-stopped") restart_zh="除手動停止外";; *) restart_zh="${restart:- -}";; esac
+
+    local has_ipv4_port=false
+    # *** 核心修正：使用大括號 { ... } 將輸出作為一個整體，再餵給 while 迴圈 ***
+    # 這樣整個 while 迴圈就不在子 shell 中了
+    while IFS= read -r target_line; do
+      has_ipv4_port=true
+      local internal_port=$(echo "$target_line" | awk -F'->' '{print $2}')
+      local protocol=$(echo "$internal_port" | awk -F'/' '{print $2}')
+      internal_port=$(echo "$internal_port" | awk -F'/' '{print $1}')
+      local external_port=$(echo "$target_line" | awk -F'->' '{print $1}' | awk -F':' '{print $NF}')
+      
+      data_rows+=("$name|$status_zh|$external_port|$internal_port|$protocol|$restart_zh")
+    done < <( { [[ -n "$raw_ports" && "$raw_ports" != " " ]] && echo "$raw_ports" | tr ',' '\n' | grep '0.0.0.0:'; } )
+
+    # 現在，has_ipv4_port 和 data_rows 的修改是有效的
+    if ! $has_ipv4_port; then
+      data_rows+=("$name|$status_zh|-|-|-|$restart_zh")
     fi
-    data_rows+=("$name|$status_zh|$external_port|$internal_port|$protocol|$restart_zh")
-    # 更新最大寬度
-    local -a current_row_data=("$name" "$status_zh" "$external_port" "$internal_port" "$protocol" "$restart_zh")
+  done <<< "$container_list"
+
+  # --- 計算最大寬度 (兩段式渲染) ---
+  local last_name_for_width=""
+  for row in "${data_rows[@]}"; do
+    IFS='|' read -r name status_zh external_port internal_port protocol restart_zh <<< "$row"
+    
+    local display_name="$name"; local status_display="$status_zh"; local restart_display="$restart_zh"
+    if [[ "$name" == "$last_name_for_width" ]]; then
+      display_name=""; status_display=""; restart_display=""
+    else
+      last_name_for_width="$name"
+    fi
+    
+    local -a current_row_data=("$display_name" "$status_display" "$external_port" "$internal_port" "$protocol" "$restart_display")
     for i in "${!max_widths[@]}"; do
       local current_width=$(display_width "${current_row_data[$i]}")
       if [[ $current_width -gt ${max_widths[$i]} ]]; then
         max_widths[$i]=$current_width
       fi
     done
-  done <<< "$container_list"
+  done
 
+  # --- 格式化輸出 (完全同您的原始碼，但增加了美化邏輯) ---
   local header_line=""
-  header_line+=$(pad_left  "${headers[0]}" "${max_widths[0]}") && header_line+=" "
-  header_line+=$(pad_left  "${headers[1]}" "${max_widths[1]}") && header_line+=" "
-  header_line+=$(pad_right "${headers[2]}" "${max_widths[2]}") && header_line+=" "
-  header_line+=$(pad_right "${headers[3]}" "${max_widths[3]}") && header_line+=" "
-  header_line+=$(pad_left  "${headers[4]}" "${max_widths[4]}") && header_line+=" "
-  header_line+=$(pad_left  "${headers[5]}" "${max_widths[5]}")
+  for i in "${!headers[@]}"; do
+    if [[ ${headers[$i]} == "外埠" || ${headers[$i]} == "內埠" ]]; then
+      header_line+=$(pad_right "${headers[$i]}" "${max_widths[$i]}")
+    else
+      header_line+=$(pad_left "${headers[$i]}" "${max_widths[$i]}")
+    fi
+    [[ $i -lt $((${#headers[@]} - 1)) ]] && header_line+=" | "
+  done
   echo "$header_line"
 
-  total_width=$(display_width "$header_line")
+  local total_width=0
+  for i in "${!max_widths[@]}"; do total_width=$((total_width + max_widths[i] + 3)); done; total_width=$((total_width - 3));
   printf '%.0s-' $(seq 1 $total_width) && printf "\n"
+
+  local last_name=""
   for row in "${data_rows[@]}"; do
     IFS='|' read -r name status_zh external_port internal_port protocol restart_zh <<< "$row"
+    
+    local display_name="$name"; local status_display="$status_zh"; local restart_display="$restart_zh"
+    if [[ "$name" == "$last_name" ]]; then
+      display_name=""; status_display=""; restart_display=""
+    else
+      last_name="$name"
+    fi
+    
     local data_line=""
-    data_line+=$(pad_left  "$name"        "${max_widths[0]}") && data_line+=" "
-    data_line+=$(pad_left  "$status_zh"   "${max_widths[1]}") && data_line+=" "
-    data_line+=$(pad_right "$external_port" "${max_widths[2]}") && data_line+=" "
-    data_line+=$(pad_right "$internal_port" "${max_widths[3]}") && data_line+=" "
-    data_line+=$(pad_left  "$protocol"    "${max_widths[4]}") && data_line+=" "
-    data_line+=$(pad_left  "$restart_zh"  "${max_widths[5]}")
+    data_line+=$(pad_left  "$display_name"    "${max_widths[0]}") && data_line+=" | "
+    data_line+=$(pad_left  "$status_display"   "${max_widths[1]}") && data_line+=" | "
+    data_line+=$(pad_right "$external_port" "${max_widths[2]}") && data_line+=" | "
+    data_line+=$(pad_right "$internal_port" "${max_widths[3]}") && data_line+=" | "
+    data_line+=$(pad_left  "$protocol"    "${max_widths[4]}") && data_line+=" | "
+    data_line+=$(pad_left  "$restart_display"  "${max_widths[5]}")
     echo "$data_line"
   done
 }
