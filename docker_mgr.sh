@@ -200,7 +200,7 @@ delete_docker_containers() {
         sleep 1
       fi
     else
-      echo -e "${RED}容器 $name 跳過刪除鏡像{RESET}" >&2
+      echo -e "${RED}容器 $name 跳過刪除鏡像${RESET}" >&2
     fi
   done
 }
