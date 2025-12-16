@@ -11,7 +11,7 @@ GRAY="\033[0;90m"
 RESET="\033[0m"
 
 #版本
-version="2.9.0"
+version="2.9.1"
 
 #檢查是否root權限
 if [ "$(id -u)" -ne 0 ]; then
@@ -161,7 +161,7 @@ delete_docker_containers() {
   done
 
   if [ ${#selected_ids[@]} -eq 0 ]; then
-    echo "${RED} 沒有選擇任何有效容器，操作中止。${RESET}" >&2
+    echo -e "${RED} 沒有選擇任何有效容器，操作中止。${RESET}" >&2
     sleep 1
     return 0
   fi
@@ -172,23 +172,31 @@ delete_docker_containers() {
     echo "正在處理容器：$name ($id)"
 
     # 若容器正在運行，先停止
-    if [[ "$status" =~ ^Up ]]; then
-      if docker stop "$id"; then
-        docker rm "$id" || {
-          echo -e ${RED}"容器 $name 刪除失敗${RESET}" >&2
-          sleep 2
-          return 1
-        }
-      else
+    local state=$(docker inspect -f '{{.State.Status}}' "$id")
+    case "$state" in
+      running)
+        docker stop "$id" && docker rm "$id" || {
+        docker update --restart=no "$id" >/dev/null 2>&1
+        docker kill "$id"
         docker rm -f "$id"
-      fi
-    else
-      docker rm "$id" || {
-        echo -e ${RED}"容器 $name 刪除失敗${RESET}" >&2
-        sleep 2
-        return 1
       }
-    fi
+      ;;
+    restarting)
+      docker update --restart=no "$id" >/dev/null 2>&1
+      docker kill "$id"
+      docker rm -f "$id"
+      ;;
+    paused)
+      docker unpause "$id"
+      docker stop "$id"
+      docker rm "$id"
+      ;;
+    exited|created|dead)
+      docker rm "$id" || {
+        docker rm "$id" -f
+      }
+      ;;
+    esac
     read -p "是否同時刪除鏡像 $image？ (y/n) [預設：y]" delete_image
     delete_image=${delete_image,,}
     delete_image=${delete_image:-y}
@@ -2019,6 +2027,7 @@ update_docker_container() {
     echo -e "${CYAN}正在分析 $container_name 參數...${RESET}"
 
     local image=$(docker inspect -f '{{.Config.Image}}' "$container_name")
+    local old_image_id=$(docker inspect -f '{{.Image}}' "$container_name")
 
     echo -e "${CYAN}正在拉取鏡像 $image ...${RESET}"
     pull_output=$(docker pull "$image" 2>&1)
@@ -2083,10 +2092,13 @@ update_docker_container() {
     docker rm "$container_name"
 
     docker run -d --name "$container_name" \
-        $restart_arg $network_arg $port_args $volumes $envs $extra_hosts $user_arg \
-        "$image"
-
+      $restart_arg $network_arg $port_args $volumes $envs $extra_hosts $user_arg \
+      "$image"
     echo -e "${GREEN}$container_name 已更新並重新啟動。${RESET}"
+    local new_image_id=$(docker inspect -f '{{.Image}}' "$container_name")
+    if [[ "$old_image_id" != "$new_image_id" ]]; then
+      docker rmi "$old_image_id" 2>/dev/null || true
+    fi
 }
 uninstall_docker_app(){
   local app_name="$1"
@@ -2382,7 +2394,10 @@ while true; do
     read -p "操作完成，請按任意鍵繼續..." -n1 
     ;;
   9)
-    docker system prune -a -f
+    docker image prune -a -f
+    docker network prune -f
+    docker volume prune -f
+    docker builder prune -f
     read -p "操作完成，請按任意鍵繼續..." -n1 
     ;;
   10)
