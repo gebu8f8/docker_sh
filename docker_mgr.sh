@@ -11,7 +11,7 @@ GRAY="\033[0;90m"
 RESET="\033[0m"
 
 #版本
-version="2.9.1"
+version="2.9.2"
 
 #檢查是否root權限
 if [ "$(id -u)" -ne 0 ]; then
@@ -518,8 +518,6 @@ docker_resource_manager() {
   }
 
   while true; do
-    echo -e "${CYAN} 正在讀取容器資源使用狀態...${RESET}"
-
     # --- 效能優化: 一次性批次獲取所有資訊 ---
     local all_containers_raw=$(docker ps -a --format "{{.Names}}|{{.ID}}")
     if [ -z "$all_containers_raw" ]; then
@@ -623,18 +621,43 @@ docker_resource_manager() {
       if ! [[ "$num" =~ ^[0-9]+$ ]] || [ "$num" -lt 1 ] || [ "$num" -ge "$index" ]; then
         echo -e "${RED}無效編號${RESET}"; continue; fi
       IFS='|' read -r id name <<< "${container_info[$((num-1))]}"
-      read -p "請輸入新的 CPU 配額（例如 0.5；輸入 0 表示無限制）: " cpu_limit
+      echo "${YELLOW}警告！如果已經設定配額的無法取消 這是docker硬性規定，若要取消請受凍重現容器，謝謝！${RESET}"
+      read -p "請輸入新的 CPU 配額（例如 0.5）: " cpu_limit
       docker update --cpus="$cpu_limit" "$id" > /dev/null
       if [[ $? -eq 0 ]]; then echo -e "${GREEN}容器 '$name' CPU 限制已更新${RESET}"; else echo -e "${RED}更新失敗${RESET}"; fi
       ;;
     2)
+      to_bytes() {
+        local input=$(echo "$1" | tr '[:upper:]' '[:lower:]')
+        local num="${input//[^0-9.]/}"
+        local unit="${input//[0-9.]/}"
+        if [ -z "$num" ]; then echo "0"; return; fi
+        case "$unit" in
+          g|gb) awk -v n="$num" 'BEGIN {printf "%.0f", n * 1024 * 1024 * 1024}' ;;
+          m|mb) awk -v n="$num" 'BEGIN {printf "%.0f", n * 1024 * 1024}' ;;
+          k|kb) awk -v n="$num" 'BEGIN {printf "%.0f", n * 1024}' ;;
+          *)    echo "$num" ;; 
+        esac
+      }
       read -p "請輸入欲修改 記憶體 限制的容器編號: " num
       if ! [[ "$num" =~ ^[0-9]+$ ]] || [ "$num" -lt 1 ] || [ "$num" -ge "$index" ]; then
         echo -e "${RED}無效編號${RESET}"; continue; fi
       IFS='|' read -r id name <<< "${container_info[$((num-1))]}"
-      read -p "請輸入新的記憶體限制（如 512m、1g；輸入 0 表示無限制）: " mem_limit
-      docker update --memory="$mem_limit" "$id" > /dev/null
-      if [[ $? -eq 0 ]]; then echo -e "${GREEN}容器 '$name' 記憶體 限制已更新${RESET}"; else echo -e "${RED}更新失敗${RESET}"; fi
+      echo "${YELLOW}警告！如果已經設定配額的無法取消 這是docker硬性規定，若要取消請受凍重現容器，謝謝！${RESET}"
+      read -p "請輸入新的記憶體限制（如 512m, 1g）: " ram_input
+      ram_bytes=$(to_bytes "$ram_input")
+      buffer_bytes=$((10 * 1024 * 1024)) 
+      total_bytes=$(awk -v r="$ram_bytes" -v b="$buffer_bytes" 'BEGIN {printf "%.0f", r + b}')
+      if [ "$ram_input" == "0" ]; then
+        docker update --memory=0 --memory-swap=-1 "$id" > /dev/null
+      else
+        docker update --memory="$ram_bytes" --memory-swap="$total_bytes" "$id" > /dev/null
+      fi
+      if [[ $? -eq 0 ]]; then
+        echo -e "${GREEN}容器 '$name' 記憶體 限制已更新${RESET}"
+      else
+        echo -e "${RED}更新失敗${RESET}"
+      fi
       ;;
     0) echo -e "${CYAN}返回上一層${RESET}"; break;;
     *) echo -e "${RED}無效選項${RESET}";;
