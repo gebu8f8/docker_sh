@@ -11,7 +11,7 @@ GRAY="\033[0;90m"
 RESET="\033[0m"
 
 #版本
-version="2.9.2"
+version="2.9.3"
 
 #檢查是否root權限
 if [ "$(id -u)" -ne 0 ]; then
@@ -214,34 +214,157 @@ delete_docker_containers() {
 }
 
 docker_network_manager() {
+  # --- 1. 通用排版輔助函式 ---
+  display_width() {
+    local str="$1"; local width=0; local i=0
+    while [ $i -lt ${#str} ]; do
+      local char="${str:$i:1}"
+      if [[ $(printf "%d" "'$char") -gt 127 ]] 2>/dev/null; then
+        width=$((width + 2))
+      else 
+        width=$((width + 1))
+      fi
+      i=$((i + 1))
+    done
+    echo $width
+  }
+  
+  pad_left() {
+    local text="$1"
+    local max_width="$2"
+    local current_width=$(display_width "$text")
+    local padding=$((max_width - current_width))
+    [[ $padding -lt 0 ]] && padding=0
+    printf "%s%*s" "$text" $padding ""
+  }
+
   echo
   echo -e "${CYAN}當前容器網路資訊：${RESET}"
-
-  # 先取得所有容器
-  local containers=$(docker ps -q)
-
-  if [ -z "$containers" ]; then
+  # 取得運行中的容器 ID
+  local container_ids=$(docker ps -q)
+  
+  if [ -z "$container_ids" ]; then
     echo -e "${YELLOW}沒有正在運行的容器。${RESET}"
-  else
-    # 收集資料
-    local data=()
-    for id in $containers; do
-      local name=$(docker inspect -f '{{.Name}}' "$id" | sed 's|/||')
-      local networks=$(docker inspect -f '{{range $k, $v := .NetworkSettings.Networks}}{{printf "%s;%s;%s\n" $k $v.IPAddress $v.Gateway}}{{end}}' "$id")
-
-      while IFS=';' read -r net ip gw; do
-        data+=("$name|$net|$ip|$gw")
-      done <<< "$networks"
-    done
-
-        # 印出表格
-    printf "%-20s %-20s %-16s %-16s\n" "容器名" "網路" "IP地址" "網關"
-    printf "%s\n" "-------------------------------------------------------------------------------------------"
-    for row in "${data[@]}"; do
-      IFS='|' read -r name net ip gw <<< "$row"
-      printf "%-20s %-20s %-16s %-16s\n" "$name" "$net" "$ip" "$gw"
-    done
+    return 0
   fi
+
+  # --- 2. 資料收集與全域狀態檢查 ---
+  # 格式定義: 容器名|網路名,IPv4,IPv4網關,IPv6,IPv6網關#網路名2...
+  local inspect_format='{{.Name}}|{{range $k, $v := .NetworkSettings.Networks}}{{$k}},{{$v.IPAddress}},{{$v.Gateway}},{{$v.GlobalIPv6Address}},{{$v.IPv6Gateway}}#{{end}}'
+  
+  local raw_data
+  raw_data=$(docker inspect --format "$inspect_format" $container_ids 2>/dev/null)
+
+  local -a data_rows=()
+  
+  # 旗標：用來判斷是否需要顯示該欄位
+  local has_any_ipv6=false
+  local has_any_ipv6_gw=false
+
+  # 解析數據
+  while IFS='|' read -r name net_info; do
+    name="${name:1}" # 去除開頭的 /
+    
+    # 處理無網路情況
+    if [ -z "$net_info" ]; then
+      # 為了保持格式一致，我們塞入空的佔位符
+      data_rows+=("$name|host/none||||")
+      continue
+    fi
+
+    # 分割多個網路 (以 # 分隔)
+    local networks=$(echo "$net_info" | tr '#' '\n')
+    
+    while IFS=',' read -r net_name ip4 gw4 ip6 gw6; do
+      [ -z "$net_name" ] && continue
+      
+      # 資料淨化：如果是 <no value> 或空，就設為空字串
+      [[ "$ip4" == "invalid IP" ]] && ip4=""
+      [[ "$gw4" == "invalid IP" ]] && gw4=""
+      [[ "$ip6" == "invalid IP" ]] && ip6=""
+      [[ "$gw6" == "invalid IP" ]] && gw6=""
+
+      # 檢查是否偵測到 IPv6 資料 (只要有一個容器有，就開啟該欄位)
+      [[ -n "$ip6" ]] && has_any_ipv6=true
+      [[ -n "$gw6" ]] && has_any_ipv6_gw=true
+
+      data_rows+=("$name|$net_name|$ip4|$gw4|$ip6|$gw6")
+    done <<< "$networks"
+  done <<< "$raw_data"
+
+  # --- 3. 動態欄位配置 ---
+  # 定義所有可能的標題與對應的資料索引 (0-5)
+  local full_headers=("容器名" "網路" "IPv4 地址" "IPv4 網關" "IPv6 地址" "IPv6 網關")
+  local -a active_indices=(0 1 2 3) # 預設顯示前四欄
+
+  # 根據全域旗標決定是否加入 IPv6 欄位索引
+  if $has_any_ipv6; then active_indices+=(4); fi
+  if $has_any_ipv6_gw; then active_indices+=(5); fi
+
+  # --- 4. 計算最大寬度 ---
+  local -a max_widths=()
+  
+  # 初始化標題寬度 (只針對啟用的欄位)
+  for idx in "${active_indices[@]}"; do
+    max_widths[$idx]=$(display_width "${full_headers[$idx]}")
+  done
+
+  # 掃描資料更新最大寬度
+  for row in "${data_rows[@]}"; do
+    IFS='|' read -r c0 c1 c2 c3 c4 c5 <<< "$row"
+    local cols=("$c0" "$c1" "$c2" "$c3" "$c4" "$c5")
+    
+    for idx in "${active_indices[@]}"; do
+      local w=$(display_width "${cols[$idx]}")
+      if [[ $w -gt ${max_widths[$idx]} ]]; then
+        max_widths[$idx]=$w
+      fi
+    done
+  done
+
+  # --- 5. 渲染表格 ---
+  
+  # (A) 印出標題
+  local header_line=""
+  for i in "${!active_indices[@]}"; do
+    local idx=${active_indices[$i]}
+    header_line+=$(pad_left "${full_headers[$idx]}" "${max_widths[$idx]}")
+    # 只要不是最後一個啟用的欄位，就加分隔線
+    [[ $i -lt $((${#active_indices[@]} - 1)) ]] && header_line+=" | "
+  done
+  echo "$header_line"
+
+  # (B) 印出分隔線
+  local total_width=0
+  for idx in "${active_indices[@]}"; do 
+    total_width=$((total_width + max_widths[idx] + 3))
+  done
+  total_width=$((total_width - 3))
+  printf '%.0s-' $(seq 1 $total_width) && printf "\n"
+
+  # (C) 印出資料
+  local last_name=""
+  for row in "${data_rows[@]}"; do
+    IFS='|' read -r c0 c1 c2 c3 c4 c5 <<< "$row"
+    local cols=("$c0" "$c1" "$c2" "$c3" "$c4" "$c5")
+
+    # 處理重複名稱隱藏
+    local display_name="${cols[0]}"
+    if [[ "${cols[0]}" == "$last_name" ]]; then
+      cols[0]="" # 將顯示用的名稱清空
+    else
+      last_name="${cols[0]}"
+    fi
+
+    local line=""
+    for i in "${!active_indices[@]}"; do
+      local idx=${active_indices[$i]}
+      line+=$(pad_left "${cols[$idx]}" "${max_widths[$idx]}")
+      [[ $i -lt $((${#active_indices[@]} - 1)) ]] && line+=" | "
+    done
+
+    echo "$line"
+  done
 
   # 額外列出所有現有網路
   echo
@@ -621,7 +744,7 @@ docker_resource_manager() {
       if ! [[ "$num" =~ ^[0-9]+$ ]] || [ "$num" -lt 1 ] || [ "$num" -ge "$index" ]; then
         echo -e "${RED}無效編號${RESET}"; continue; fi
       IFS='|' read -r id name <<< "${container_info[$((num-1))]}"
-      echo "${YELLOW}警告！如果已經設定配額的無法取消 這是docker硬性規定，若要取消請受凍重現容器，謝謝！${RESET}"
+      echo -e "${YELLOW}警告！如果已經設定配額的無法取消 這是docker硬性規定，若要取消請受凍重現容器，謝謝！${RESET}"
       read -p "請輸入新的 CPU 配額（例如 0.5）: " cpu_limit
       docker update --cpus="$cpu_limit" "$id" > /dev/null
       if [[ $? -eq 0 ]]; then echo -e "${GREEN}容器 '$name' CPU 限制已更新${RESET}"; else echo -e "${RED}更新失敗${RESET}"; fi
@@ -643,7 +766,7 @@ docker_resource_manager() {
       if ! [[ "$num" =~ ^[0-9]+$ ]] || [ "$num" -lt 1 ] || [ "$num" -ge "$index" ]; then
         echo -e "${RED}無效編號${RESET}"; continue; fi
       IFS='|' read -r id name <<< "${container_info[$((num-1))]}"
-      echo "${YELLOW}警告！如果已經設定配額的無法取消 這是docker硬性規定，若要取消請受凍重現容器，謝謝！${RESET}"
+      echo -e "${YELLOW}警告！如果已經設定配額的無法取消 這是docker硬性規定，若要取消請受凍重現容器，謝謝！${RESET}"
       read -p "請輸入新的記憶體限制（如 512m, 1g）: " ram_input
       ram_bytes=$(to_bytes "$ram_input")
       buffer_bytes=$((10 * 1024 * 1024)) 
