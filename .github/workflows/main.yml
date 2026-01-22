@@ -29,7 +29,7 @@ jobs:
               fi
              else
                 # 若 repo 僅有一個 commit
-               if git ls-tree --name-only HEAD | grep -q '^ng\.sh$'; then
+               if git ls-tree --name-only HEAD | grep -q '^docker_mgr\.sh$'; then
                  echo "changed_ngsh=true" >> $GITHUB_ENV
                  echo "首次 commit 包含 docker_mgr.sh"
                else
