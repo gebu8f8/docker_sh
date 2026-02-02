@@ -11,7 +11,7 @@ GRAY="\033[0;90m"
 RESET="\033[0m"
 
 #版本
-version="2.9.3"
+version="2.9.4"
 
 #檢查是否root權限
 if [ "$(id -u)" -ne 0 ]; then
@@ -1385,8 +1385,29 @@ install_docker_and_compose() {
   if ! command -v docker &>/dev/null; then
 
     if [ "$system" -eq 1 ] || [ "$system" -eq 2 ]; then
-      # 使用官方腳本安裝
-      curl -fsSL https://get.docker.com | sh
+      if [ -f /etc/fedora-release ]; then
+        dnf config-manager addrepo --from-repofile https://download.docker.com/linux/fedora/docker-ce.repos
+        dnf install docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+        systemctl enable --now docker-compose-plugin
+      elif [ -f /etc/centos-release ]; then
+        dnf -y install dnf-plugins-core
+        dnf config-manager --add-repo https://download.docker.com/linux/centos/docker-ce.repo
+        dnf install docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+        systemctl enable --now docker-compose-plugin
+      elif [ -f /etc/redhat-release ]; then
+        dnf -y install dnf-plugins-core
+        dnf config-manager --add-repo https://download.docker.com/linux/rhel/docker-ce.repo
+        dnf install -y \
+          docker-ce \
+          docker-ce-cli \
+          containerd.io \
+          docker-buildx-plugin \
+          docker-compose-plugin
+        systemctl enable --now docker
+      else
+        # 使用官方腳本安裝
+        curl -fsSL https://get.docker.com | sh
+      fi
     elif [ "$system" -eq 3 ]; then
       # Alpine Linux
       apk add docker
@@ -1446,6 +1467,7 @@ install_docker_and_compose() {
         service docker start
       fi
   fi
+  sleep 2.5
 }
 uninstall_docker() {
   echo -e "${RED}警告：此操作將會徹底刪除 Docker Engine, Docker Compose，以及所有的容器、映像、儲存卷和網路。${RESET}"
