@@ -2630,4 +2630,59 @@ while true; do
     ;;
   10)
     menu_docker_app
-    read -p "�
+    read -p "操作完成，請按任意鍵繼續..." -n1 
+    ;;
+  11)
+    docker_show_logs
+    read -p "操作完成，請按任意鍵繼續..." -n1 
+    ;;
+  12)
+    debug_container
+    read -p "操作完成，請按任意鍵繼續..." -n1 
+    ;;
+  13)
+    bash <(curl -sSL https://linuxmirrors.cn/docker.sh) --only-registry
+    read -p "操作完成，請按任意鍵繼續..." -n1
+    ;;
+  14)
+    DAEMON_JSON="/etc/docker/daemon.json"
+    if [ ! -f "$DAEMON_JSON" ]; then
+        echo "檔案 $DAEMON_JSON 不存在。正在為您建立..."
+        touch "$DAEMON_JSON"
+        echo "{}" > "$DAEMON_JSON"
+    fi
+    checksum_before=$(md5sum "$DAEMON_JSON" 2>/dev/null | awk '{print $1}')
+    nano "$DAEMON_JSON"
+    checksum_after=$(md5sum "$DAEMON_JSON" 2>/dev/null | awk '{print $1}')
+    if [ "$checksum_before" != "$checksum_after" ]; then
+        echo "daemon.json 已修改，正在重啟 Docker..."
+        service docker restart && echo "Docker 已成功重啟。" || echo "Docker 重啟失敗。"
+    else
+        echo "daemon.json 未修改。"
+    fi
+    read -p "操作完成，請按任意鍵繼續..." -n1
+    ;;
+  15)
+    toggle_docker_ipv6
+    read -p "操作完成，請按任意鍵繼續..." -n1
+    ;;
+  0)
+    echo "感謝使用。"
+    stty echo
+    exit 0
+    ;;
+  r)
+    uninstall_docker
+    exit 0
+    ;;
+  u)
+    update_script
+    ;;
+  *)
+    if [[ -n "$choice" ]]; then
+        echo "無效的選擇: $choice"
+        sleep 0.5
+    fi
+    ;;
+  esac
+done
