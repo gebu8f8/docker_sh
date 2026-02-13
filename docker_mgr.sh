@@ -11,7 +11,11 @@ GRAY="\033[0;90m"
 RESET="\033[0m"
 
 #版本
-version="2.9.4"
+version="2.9.5"
+
+#變量
+CURRENT_PAGE=1
+TOTAL_PAGES=1
 
 #檢查是否root權限
 if [ "$(id -u)" -ne 0 ]; then
@@ -1803,149 +1807,152 @@ restart_docker_container() {
 }
 
 show_docker_containers() {
-  # --- 通用排版輔助函式 (完全同您的原始碼) ---
+  local target_page="$1"
+  [ -z "$target_page" ] && target_page=1
+  
+  D_GREEN='\033[0;32m'
+
+  if ! command -v docker &>/dev/null; then echo -e "${RED}Docker 未安裝或未運行。${RESET}"; return 1; fi
+
   display_width() {
-    local str="$1"; local width=0; local i=0
-    while [ $i -lt ${#str} ]; do
+    local str="$1"; local width=0; local i=0; local len=${#str}
+    while [ $i -lt $len ]; do
       local char="${str:$i:1}"
-      if [[ $(printf "%d" "'$char") -gt 127 ]] 2>/dev/null; then
-        width=$((width + 2))
-      else 
-        width=$((width + 1))
-      fi
+      if [[ $(printf "%d" "'$char") -gt 127 ]] 2>/dev/null; then width=$((width + 2)); else width=$((width + 1)); fi
       i=$((i + 1))
     done
     echo $width
   }
-  pad_left() {
-    local text="$1"
-    local max_width="$2"
-    local current_width=$(display_width "$text")
-    local padding=$((max_width - current_width))
-    printf "%s%*s" "$text" $padding ""
-  }
-  pad_right() {
-    local text="$1"
-    local max_width="$2"
-    local current_width=$(display_width "$text")
-    local padding=$((max_width - current_width))
-    printf "%*s%s" $padding "" "$text"
+  pad_str() {
+    local text="$1"; local max="$2"; local align="$3"
+    local w; w=$(display_width "$text")
+    local pad=$((max - w)); [[ $pad -lt 0 ]] && pad=0
+    local spaces; printf -v spaces "%*s" $pad ""
+    if [[ "$align" == "right" ]]; then echo "${spaces}${text}"; else echo "${text}${spaces}"; fi
   }
 
-  if ! command -v docker &>/dev/null; then echo -e "${RED}Docker 未安裝或未運行。${RESET}"; return 1; fi
-
-  # --- 資訊獲取 (完全同您的原始碼) ---
-  local container_list=$(docker ps -a --format "{{.Names}}|{{.ID}}")
-  if [ -z "$container_list" ]; then echo -e "${YELLOW} 沒有任何容器存在。${RESET}"; return 0; fi
+  # --- 資料獲取 ---
+  declare -A restart_map
+  local all_ids=$(docker ps -a -q)
   
-  local all_ids=$(echo "$container_list" | cut -d'|' -f2 | tr '\n' ' ')
-  declare -A status_map; declare -A restart_map
-  local inspect_output
-  inspect_output=$(docker inspect --format '{{.Name}}|{{.State.Status}}|{{.HostConfig.RestartPolicy.Name}}' $all_ids 2>/dev/null | sed 's/^\///')
-  if [[ -n "$inspect_output" ]]; then
-    while IFS='|' read -r name status restart; do
-      status_map["$name"]="$status"
-      restart_map["$name"]="$restart"
-    done <<< "$inspect_output"
+  if [ -z "$all_ids" ]; then 
+    echo -e "${YELLOW}沒有任何容器存在。${RESET}"
+    TOTAL_PAGES=1
+    return 0
   fi
 
-  declare -A port_map
-  while IFS='|' read -r name ports; do
-    port_map["$name"]="$ports"
-  done <<< $(docker ps -a --format "{{.Names}}|{{.Ports}}")
+  while IFS='|' read -r id policy; do 
+      restart_map["$id"]="$policy"
+  done < <(docker inspect --format '{{printf "%.12s" .Id}}|{{.HostConfig.RestartPolicy.Name}}' $all_ids 2>/dev/null)
+
+  local -a render_rows=() 
+  local raw_ps_output=$(docker ps -a --format "{{.ID}}§{{.Names}}§{{.State}}§{{.Ports}}")
+
+  # --- 解析迴圈 (修正去重邏輯) ---
+  while IFS='§' read -r id name status ports_raw; do
+    local status_zh
+    case "$status" in 
+      "running") status_zh="${D_GREEN}運行中${RESET}";; "exited") status_zh="${GRAY}已停止${RESET}";; 
+      "paused") status_zh="${YELLOW}已暫停${RESET}";; "created") status_zh="${BLUE}已建立${RESET}";; 
+      *) status_zh="$status";; 
+    esac
+    
+    local policy_raw="${restart_map["$id"]}"
+    local restart_zh
+    case "$policy_raw" in 
+      "no") restart_zh="不重啟";; "always") restart_zh="永遠重啟";; 
+      "on-failure") restart_zh="錯誤時重啟";; "unless-stopped") restart_zh="除手動停止外";; 
+      *) restart_zh="${policy_raw:- -}";; 
+    esac
+
+    local has_port=false
+    # [關鍵修改 1] 宣告一個臨時關聯陣列，用來記錄這個容器已經處理過哪些端口組合
+    declare -A seen_ports 
+
+    if [[ -n "$ports_raw" ]]; then
+      IFS=',' read -ra PORT_ARR <<< "$ports_raw"
+      for p in "${PORT_ARR[@]}"; do
+        p="${p#"${p%%[![:space:]]*}"}" # trim
+        
+        if [[ "$p" == *"->"* ]]; then
+          local ip_ext="${p%%->*}"; local int_proto="${p##*->}"
+          local ext_port="${ip_ext##*:}"; local int_port="${int_proto%%/*}"; local proto="${int_proto##*/}"
+          local port_key="${ext_port}:${int_port}:${proto}"
+          if [[ -z "${seen_ports[$port_key]}" ]]; then
+            render_rows+=("$name|$status_zh|$ext_port|$int_port|$proto|$restart_zh")
+          seen_ports["$port_key"]=1 # 標記為已處理
+                has_port=true
+          fi
+        fi
+      done
+    fi
+    unset seen_ports
+
+    if [ "$has_port" = false ]; then render_rows+=("$name|$status_zh|-|-|-|$restart_zh"); fi
+  done <<< "$raw_ps_output"
+
+  # --- 分頁計算 ---
+  local total_rows=${#render_rows[@]}
+  local page_size=10
+  TOTAL_PAGES=$(( (total_rows + page_size - 1) / page_size ))
+  [[ $TOTAL_PAGES -eq 0 ]] && TOTAL_PAGES=1
   
+  if [ "$target_page" -gt "$TOTAL_PAGES" ]; then target_page=$TOTAL_PAGES; fi
+  if [ "$target_page" -lt 1 ]; then target_page=1; fi
+  CURRENT_PAGE=$target_page 
+
   # --- 渲染準備 ---
+  local start_index=$(( (target_page - 1) * page_size ))
+  local end_index=$(( start_index + page_size - 1 ))
+  if [ $end_index -ge $total_rows ]; then end_index=$(( total_rows - 1 )); fi
+
   local headers=("容器名" "狀態" "外埠" "內埠" "協議" "重啟策略")
-  local -a max_widths=()
-  for header in "${headers[@]}"; do max_widths+=($(display_width "$header")); done
-  
-  local -a data_rows
-  
-  # --- 核心 bug 修正 ---
-  while IFS='|' read -r name id; do
-    local status=${status_map["$name"]}
-    local restart=${restart_map["$name"]}
-    local raw_ports=${port_map["$name"]}
+  local -a col_widths=(0 0 0 0 0 0)
+  for i in "${!headers[@]}"; do col_widths[$i]=$(display_width "${headers[$i]}"); done
 
-    local status_zh; case "$status" in "running") status_zh="運行中";; "exited") status_zh="已停止";; "paused") status_zh="已暫停";; "created") status_zh="已建立";; *) status_zh="$status";; esac
-    local restart_zh; case "$restart" in "no") restart_zh="不重啟";; "always") restart_zh="永遠重啟";; "on-failure") restart_zh="錯誤時重啟";; "unless-stopped") restart_zh="除手動停止外";; *) restart_zh="${restart:- -}";; esac
+  local -a page_data=()
+  for ((i=start_index; i<=end_index; i++)); do page_data+=("${render_rows[$i]}"); done
 
-    local has_ipv4_port=false
-    # *** 核心修正：使用大括號 { ... } 將輸出作為一個整體，再餵給 while 迴圈 ***
-    # 這樣整個 while 迴圈就不在子 shell 中了
-    while IFS= read -r target_line; do
-      has_ipv4_port=true
-      local internal_port=$(echo "$target_line" | awk -F'->' '{print $2}')
-      local protocol=$(echo "$internal_port" | awk -F'/' '{print $2}')
-      internal_port=$(echo "$internal_port" | awk -F'/' '{print $1}')
-      local external_port=$(echo "$target_line" | awk -F'->' '{print $1}' | awk -F':' '{print $NF}')
+  local last_name_check=""
+  local -a display_rows=()
+  for row_str in "${page_data[@]}"; do
+      IFS='|' read -r n s e i p r <<< "$row_str"
+      local d_n="$n"; local d_s="$s"; local d_r="$r"
+      if [[ "$n" == "$last_name_check" ]]; then d_n=""; d_s=""; d_r=""; else last_name_check="$n"; fi
       
-      data_rows+=("$name|$status_zh|$external_port|$internal_port|$protocol|$restart_zh")
-    done < <( { [[ -n "$raw_ports" && "$raw_ports" != " " ]] && echo "$raw_ports" | tr ',' '\n' | grep '0.0.0.0:'; } )
-
-    # 現在，has_ipv4_port 和 data_rows 的修改是有效的
-    if ! $has_ipv4_port; then
-      data_rows+=("$name|$status_zh|-|-|-|$restart_zh")
-    fi
-  done <<< "$container_list"
-
-  # --- 計算最大寬度 (兩段式渲染) ---
-  local last_name_for_width=""
-  for row in "${data_rows[@]}"; do
-    IFS='|' read -r name status_zh external_port internal_port protocol restart_zh <<< "$row"
-    
-    local display_name="$name"; local status_display="$status_zh"; local restart_display="$restart_zh"
-    if [[ "$name" == "$last_name_for_width" ]]; then
-      display_name=""; status_display=""; restart_display=""
-    else
-      last_name_for_width="$name"
-    fi
-    
-    local -a current_row_data=("$display_name" "$status_display" "$external_port" "$internal_port" "$protocol" "$restart_display")
-    for i in "${!max_widths[@]}"; do
-      local current_width=$(display_width "${current_row_data[$i]}")
-      if [[ $current_width -gt ${max_widths[$i]} ]]; then
-        max_widths[$i]=$current_width
-      fi
-    done
+      local clean_s=$(echo -e "$d_s" | sed "s/\x1B\[[0-9;]*[a-zA-Z]//g")
+      [ $(display_width "$d_n") -gt ${col_widths[0]} ] && col_widths[0]=$(display_width "$d_n")
+      [ $(display_width "$clean_s") -gt ${col_widths[1]} ] && col_widths[1]=$(display_width "$clean_s")
+      [ $(display_width "$e") -gt ${col_widths[2]} ] && col_widths[2]=$(display_width "$e")
+      [ $(display_width "$i") -gt ${col_widths[3]} ] && col_widths[3]=$(display_width "$i")
+      [ $(display_width "$p") -gt ${col_widths[4]} ] && col_widths[4]=$(display_width "$p")
+      [ $(display_width "$d_r") -gt ${col_widths[5]} ] && col_widths[5]=$(display_width "$d_r")
+      display_rows+=("$d_n|$d_s|$e|$i|$p|$d_r")
   done
 
-  # --- 格式化輸出 (完全同您的原始碼，但增加了美化邏輯) ---
+  # --- 實際輸出 ---
   local header_line=""
-  for i in "${!headers[@]}"; do
-    if [[ ${headers[$i]} == "外埠" || ${headers[$i]} == "內埠" ]]; then
-      header_line+=$(pad_right "${headers[$i]}" "${max_widths[$i]}")
-    else
-      header_line+=$(pad_left "${headers[$i]}" "${max_widths[$i]}")
-    fi
-    [[ $i -lt $((${#headers[@]} - 1)) ]] && header_line+=" | "
+  for idx in "${!headers[@]}"; do
+      local align="left"; [[ "${headers[$idx]}" == *"埠"* ]] && align="right"
+      header_line+=$(pad_str "${headers[$idx]}" "${col_widths[$idx]}" "$align")
+      [[ $idx -lt 5 ]] && header_line+=" | "
   done
-  echo "$header_line"
-
-  local total_width=0
-  for i in "${!max_widths[@]}"; do total_width=$((total_width + max_widths[i] + 3)); done; total_width=$((total_width - 3));
-  printf '%.0s-' $(seq 1 $total_width) && printf "\n"
-
-  local last_name=""
-  for row in "${data_rows[@]}"; do
-    IFS='|' read -r name status_zh external_port internal_port protocol restart_zh <<< "$row"
-    
-    local display_name="$name"; local status_display="$status_zh"; local restart_display="$restart_zh"
-    if [[ "$name" == "$last_name" ]]; then
-      display_name=""; status_display=""; restart_display=""
-    else
-      last_name="$name"
-    fi
-    
-    local data_line=""
-    data_line+=$(pad_left  "$display_name"    "${max_widths[0]}") && data_line+=" | "
-    data_line+=$(pad_left  "$status_display"   "${max_widths[1]}") && data_line+=" | "
-    data_line+=$(pad_right "$external_port" "${max_widths[2]}") && data_line+=" | "
-    data_line+=$(pad_right "$internal_port" "${max_widths[3]}") && data_line+=" | "
-    data_line+=$(pad_left  "$protocol"    "${max_widths[4]}") && data_line+=" | "
-    data_line+=$(pad_left  "$restart_display"  "${max_widths[5]}")
-    echo "$data_line"
+  echo -e "${BLUE}${header_line}${RESET}"
+  
+  for row_str in "${display_rows[@]}"; do
+      IFS='|' read -r n s e i p r <<< "$row_str"
+      local line=""
+      line+=$(pad_str "$n" "${col_widths[0]}" "left") && line+=" | "
+      local clean_s=$(echo -e "$s" | sed "s/\x1B\[[0-9;]*[a-zA-Z]//g")
+      local s_pad=$(( ${col_widths[1]} - $(display_width "$clean_s") ))
+      line+="${s}"; printf -v sp "%*s" $s_pad ""; line+="$sp | "
+      line+=$(pad_str "$e" "${col_widths[2]}" "right") && line+=" | "
+      line+=$(pad_str "$i" "${col_widths[3]}" "right") && line+=" | "
+      line+=$(pad_str "$p" "${col_widths[4]}" "left") && line+=" | "
+      line+=$(pad_str "$r" "${col_widths[5]}" "left")
+      echo -e "$line"
   done
+  echo -e "${GRAY}頁碼: $CURRENT_PAGE / $TOTAL_PAGES${RESET}"
 }
 
 start_docker_container() {
@@ -2487,7 +2494,6 @@ update_script() {
 }
 
 show_menu(){
-  show_docker_containers
   echo -e "${CYAN}-------------------${RESET}"
   echo -e "${YELLOW}Docker 管理選單${RESET}"
   echo ""
@@ -2503,15 +2509,55 @@ show_menu(){
   echo ""
   echo -e "${GREEN}10.${RESET} 推薦容器            ${GREEN}11.${RESET} Docker 容器日誌讀取"
   echo ""
-  echo -e "${GREEN}12.${RESET} 調試 Docker 容器    ${GREEN}13.${RESET} Docker 換源工具(SuperManito開源作品) "
+  echo -e "${GREEN}12.${RESET} 調試 Docker 容器    ${GREEN}13.${RESET} Docker 換源工具 "
   echo ""
-  echo -e "${GREEN}14.${RESET} 編輯daemon.json文件【初學者慎用】     ${GREEN}15.${RESET} 開啟/關閉ipv6"
+  echo -e "${GREEN}14.${RESET} 編輯daemon.json     ${GREEN}15.${RESET} 開啟/關閉ipv6"
   echo ""
   echo -e "${BLUE}r.${RESET} 解除安裝docker"
   echo ""
   echo -e "${BLUE}u.${RESET} 更新腳本             ${RED}0.${RESET} 離開"
   echo -e "${CYAN}-------------------${RESET}"
+  echo -e "${GRAY}[←/→] 翻頁  [數字] 選擇選單${RESET}"
   echo -en "${YELLOW}請選擇操作 [1-15/ u r 0]: ${RESET}"
+}
+
+get_input_or_nav() {
+  local input_buffer=""
+    
+  stty -echo 
+
+  while true; do
+    read -rsn1 key # 讀取一個字元
+    if [[ "$key" == $'\e' ]]; then
+      read -rsn2 -t 0.01 key_rest
+      if [[ "$key_rest" == "[C" ]]; then
+        stty echo
+        echo "NAV_NEXT" # 這是給變數抓的結果
+        return
+      elif [[ "$key_rest" == "[D" ]]; then
+        stty echo
+        echo "NAV_PREV" # 這是給變數抓的結果
+        return
+      fi
+        
+      # 2. 處理 Enter 鍵
+      elif [[ "$key" == "" ]]; then 
+        stty echo
+        echo "" >&2         # [關鍵修改] 換行顯示給眼睛看 (>&2)
+        echo "$input_buffer" # 這是給變數抓的結果 (stdout)
+        return
+      # 3. 處理 Backspace (刪除鍵)
+      elif [[ "$key" == $'\x7f' || "$key" == $'\b' ]]; then
+        if [ ${#input_buffer} -gt 0 ]; then
+          input_buffer="${input_buffer::-1}"
+          echo -ne "\b \b" >&2 # [關鍵修改] 視覺刪除給眼睛看 (>&2)
+        fi
+      else
+        input_buffer+="$key"
+        echo -ne "$key" >&2 # [關鍵修改] 打字顯示給眼睛看 (>&2)
+      fi
+  done
+  stty echo
 }
 case "$1" in
   --version|-V)
@@ -2524,10 +2570,24 @@ check_system
 check_app
 install_docker_and_compose
 
+trap 'stty echo; exit' INT TERM
+
 while true; do
+  stty echo
   clear
+  show_docker_containers "$CURRENT_PAGE"
   show_menu
-  read -r choice
+  
+  choice=$(get_input_or_nav)
+  
+  if [[ "$choice" == "NAV_NEXT" ]]; then
+      if [ "$CURRENT_PAGE" -lt "$TOTAL_PAGES" ]; then CURRENT_PAGE=$((CURRENT_PAGE + 1)); fi
+      continue
+  elif [[ "$choice" == "NAV_PREV" ]]; then
+      if [ "$CURRENT_PAGE" -gt 1 ]; then CURRENT_PAGE=$((CURRENT_PAGE - 1)); fi
+      continue
+  fi
+
   case $choice in 
   1)
     start_docker_container
@@ -2570,61 +2630,4 @@ while true; do
     ;;
   10)
     menu_docker_app
-    read -p "操作完成，請按任意鍵繼續..." -n1 
-    ;;
-  11)
-    docker_show_logs
-    read -p "操作完成，請按任意鍵繼續..." -n1 
-    ;;
-  12)
-    debug_container
-    read -p "操作完成，請按任意鍵繼續..." -n1 
-    ;;
-  13)
-    bash <(curl -sSL https://linuxmirrors.cn/docker.sh) --only-registry
-    read -p "操作完成，請按任意鍵繼續..." -n1
-    ;;
-  14)
-    DAEMON_JSON="/etc/docker/daemon.json"
-    if [ ! -f "$DAEMON_JSON" ]; then
-        echo "檔案 $DAEMON_JSON 不存在。正在為您建立..."
-        touch "$DAEMON_JSON"
-        echo "{}" > "$DAEMON_JSON"
-    fi
-
-    checksum_before=$(md5sum "$DAEMON_JSON" 2>/dev/null | awk '{print $1}')
-    nano "$DAEMON_JSON"
-    checksum_after=$(md5sum "$DAEMON_JSON" 2>/dev/null | awk '{print $1}')
-
-    if [ "$checksum_before" != "$checksum_after" ]; then
-        echo "daemon.json 已修改，正在重啟 Docker..."
-        if service docker restart; then
-            echo "Docker 已成功重啟。"
-        else
-            echo "Docker 重啟失敗，請手動檢查。 您可以嘗試執行 'journalctl -u docker.service' 來查看日誌。"
-        fi
-    else
-        echo "daemon.json 未修改，無需重啟 Docker。"
-    fi
-    read -p "操作完成，請按任意鍵繼續..." -n1
-    ;;
-  15)
-    toggle_docker_ipv6
-    read -p "操作完成，請按任意鍵繼續..." -n1
-    ;;
-  0)
-    echo "感謝使用。"
-    exit 0
-    ;;
-  r)
-    uninstall_docker
-    exit 0
-    ;;
-  u)
-    update_script
-    ;;
-  *)
-    echo "無效的選擇"
-    ;;
-  esac
-done
+    read -p "�
