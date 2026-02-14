@@ -11,7 +11,7 @@ GRAY="\033[0;90m"
 RESET="\033[0m"
 
 #版本
-version="2.9.5"
+version="2.9.6"
 
 #變量
 CURRENT_PAGE=1
@@ -1457,21 +1457,21 @@ install_docker_and_compose() {
 
   # 啟用與開機自啟
   if [ "$system" -eq 1 ] || [ "$system" -eq 2 ]; then
-    if ! systemctl is-enabled docker &>/dev/null; then
-      systemctl enable docker
-    fi
+    systemctl is-enabled docker &>/dev/null || systemctl enable docker
+
+    # 如果沒在跑才啟動
     if ! systemctl is-active docker &>/dev/null; then
       systemctl start docker
+      sleep 2.5
     fi
   elif [ "$system" -eq 3 ]; then
     if ! rc-update show | grep -q docker; then
       rc-update add docker default
     fi
     if ! service docker status | grep -q running; then
-        service docker start
-      fi
+      service docker start  && sleep 2.5
+    fi
   fi
-  sleep 2.5
 }
 uninstall_docker() {
   echo -e "${RED}警告：此操作將會徹底刪除 Docker Engine, Docker Compose，以及所有的容器、映像、儲存卷和網路。${RESET}"
@@ -2569,7 +2569,6 @@ esac
 check_system
 check_app
 install_docker_and_compose
-
 trap 'stty echo; exit' INT TERM
 
 while true; do
