@@ -11,7 +11,7 @@ GRAY="\033[0;90m"
 RESET="\033[0m"
 
 #版本
-version="2.9.6"
+version="2.9.7"
 
 #變量
 CURRENT_PAGE=1
@@ -1184,6 +1184,37 @@ install_docker_app() {
       -v /var/run/docker.sock:/var/run/docker.sock \
       -v /srv/docker/portainer:/data \
       portainer/portainer-ce:alpine
+    local choice
+    echo -e "${YELLOW}【安全警告】您好,請注意! 本portainer容器為禁止反向代理出去, 請自行使用Tailscale或者其他VPN軟體${RESET}"
+    echo -e "${YELLOW}為了避免發生意外，我們會封鎖對外連線，是否繼續?(僅限iptables 若有其他的會跳過) 若選擇否為自行處理[Y/n,預設:是]${RESET}"
+    read -r choice
+    choice=${choice,,}
+    choice=${choice:-y}
+    if ! command -v firewall-cmd >/dev/null 2>&1 || ! command -v firewall-cmd >/dev/null 2>&1; then
+      local EXTERNAL_INTERFACE
+      local EXTERNAL_INTERFACE6
+      EXTERNAL_INTERFACE=$(ip route | grep default | grep -o 'dev [^ ]*' | cut -d' ' -f2)
+      EXTERNAL_INTERFACE6=$(ip -6 route | grep default | grep -o 'dev [^ ]*' | cut -d' ' -f2)
+      if [[ -z "$EXTERNAL_INTERFACE" || -z "$EXTERNAL_INTERFACE6" ]]; then
+        echo -e "${RED}未找到外網網卡！${RESET}"
+        sleep 1
+        return 1
+      fi
+      if [ -n "$EXTERNAL_INTERFACE" ]; then
+        iptables -I DOCKER-USER -i $EXTERNAL_INTERFACE -m conntrack --ctorigdstport $host_port DROP
+      elif [ -n "$EXTERNAL_INTERFACE6" ]; then
+        ip6tables -I DOCKER-USER -i $EXTERNAL_INTERFACE -m conntrack --ctorigdstport $host_port DROP
+      fi
+      if command -v netfilter-persistent >/dev/null 2>&1; then
+        netfilter-persistent save >/dev/null 2>&1
+      elif [ -f "/etc/init.d/iptables" ]; then
+        /etc/init.d/iptables save >/dev/null 2>&1
+        /etc/init.d/ip6tables save >/dev/null 2>&1
+      else
+        service iptables save >/dev/null 2>&1
+        service ip6tables save >/dev/null 2>&1
+      fi
+    fi
     echo "訪問位置："
     ips $host_port https
     echo -e "${CYAN}已啟用 Portainer HTTPS 自簽連線（TLS 1.3 加密保護）${RESET}"
@@ -1551,7 +1582,8 @@ manage_docker_app() {
   portainer)
     app_name2=$app_name
     can_update="true"
-    app_desc="Portainer 提供 Web UI 管理 Docker 容器、映像、網路等功能。"
+    security="false"
+    app_desc="Portainer 提供 Web UI 管理 Docker 容器、映像、網路等功能。【禁止反向代理】"
     ;;
       
   uptime-kuma)
@@ -1660,7 +1692,7 @@ manage_docker_app() {
   else
     [[ "$can_update" == "true" ]] && echo "2. 更新"
     echo "3. 移除"
-    if ! [ $type = vpn ]; then
+    if [ ! $type = vpn ] || $security; then
       echo "4. 配置域名訪問"
       echo "5. 移除現有的域名訪問"
     fi
@@ -1680,7 +1712,7 @@ manage_docker_app() {
     install_docker_app "$app_name"
     ;;
   2)
-    if [[ "$can_update" != "true" ]]; then
+    if ! "$can_update"; then
       echo -e "${RED}此應用不支援更新操作。${RESET}${RESET}"
       return
     fi
@@ -1700,17 +1732,10 @@ manage_docker_app() {
   4)
     check_site
     read -p "請輸入域名:" domain
-    if [ $app_name == portainer ]; then
-      site setup $domain proxy 127.0.0.1 https $host_port || {
+    site setup $domain proxy 127.0.0.1 http $host_port || {
       echo "站點搭建失敗"
       return 1
-      }
-    else
-      site setup $domain proxy 127.0.0.1 http $host_port || {
-        echo "站點搭建失敗"
-        return 1
-      }
-    fi
+    }
     if [ $app_name == nextcloud ]; then
       local count=$(docker exec -u www-data nextcloud php occ config:system:get trusted_domains | wc -l)
       docker exec -u www-data nextcloud php occ config:system:set trusted_domains $count --value="$domain"
