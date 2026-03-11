@@ -11,7 +11,7 @@ GRAY="\033[0;90m"
 RESET="\033[0m"
 
 #版本
-version="2.9.7"
+version="2.9.8"
 
 #變量
 CURRENT_PAGE=1
@@ -102,19 +102,36 @@ check_system(){
 }
 #檢查需要安裝之軟體
 check_app(){
+  local install_list=""
+  if [ "$system" -eq 2 ] && [ ! -f /etc/fedora-release ]; then
+    if [ ! -f /etc/yum.repos.d/epel.repo ]; then
+       dnf install -y epel-release
+    fi
+  fi
+  if ! command -v "jq" >/dev/null 2>&1; then
+      install_list+="jq"
+  fi
   if ! command -v ss &>/dev/null; then
     case $system in
       1)
-        apt update && apt install -y iproute2
+        install_list+="iproute2"
         ;;
       2)
-        yum install -y iproute2
+        install_list+="iproute2"
         ;;
       3)
-        apk update && apk add iproute2
+        install_list+="iproute2"
         ;;
     esac
   fi
+  if [ -n "$install_list" ]; then
+    case "$system" in
+      1) apt update && apt install -y $install_list ;;
+      2) dnf install -y $install_list ;;
+      3) apk add $install_list ;;
+    esac
+  fi
+  
 }
 check_site(){
   if ! command -v site &>/dev/null; then
@@ -1190,29 +1207,31 @@ install_docker_app() {
     read -r choice
     choice=${choice,,}
     choice=${choice:-y}
-    if ! command -v firewall-cmd >/dev/null 2>&1 || ! command -v firewall-cmd >/dev/null 2>&1; then
-      local EXTERNAL_INTERFACE
-      local EXTERNAL_INTERFACE6
-      EXTERNAL_INTERFACE=$(ip route | grep default | grep -o 'dev [^ ]*' | cut -d' ' -f2)
-      EXTERNAL_INTERFACE6=$(ip -6 route | grep default | grep -o 'dev [^ ]*' | cut -d' ' -f2)
-      if [[ -z "$EXTERNAL_INTERFACE" || -z "$EXTERNAL_INTERFACE6" ]]; then
-        echo -e "${RED}未找到外網網卡！${RESET}"
-        sleep 1
-        return 1
-      fi
-      if [ -n "$EXTERNAL_INTERFACE" ]; then
-        iptables -I DOCKER-USER -i $EXTERNAL_INTERFACE -m conntrack --ctorigdstport $host_port DROP
-      elif [ -n "$EXTERNAL_INTERFACE6" ]; then
-        ip6tables -I DOCKER-USER -i $EXTERNAL_INTERFACE -m conntrack --ctorigdstport $host_port DROP
-      fi
-      if command -v netfilter-persistent >/dev/null 2>&1; then
-        netfilter-persistent save >/dev/null 2>&1
-      elif [ -f "/etc/init.d/iptables" ]; then
-        /etc/init.d/iptables save >/dev/null 2>&1
-        /etc/init.d/ip6tables save >/dev/null 2>&1
-      else
-        service iptables save >/dev/null 2>&1
-        service ip6tables save >/dev/null 2>&1
+    if [[ "$choice" == "y" ]]; then
+      if ! command -v firewall-cmd >/dev/null 2>&1 || ! command -v firewall-cmd >/dev/null 2>&1; then
+        local EXTERNAL_INTERFACE
+        local EXTERNAL_INTERFACE6
+        EXTERNAL_INTERFACE=$(ip route | grep default | grep -o 'dev [^ ]*' | cut -d' ' -f2)
+        EXTERNAL_INTERFACE6=$(ip -6 route | grep default | grep -o 'dev [^ ]*' | cut -d' ' -f2)
+        if [[ -z "$EXTERNAL_INTERFACE" || -z "$EXTERNAL_INTERFACE6" ]]; then
+          echo -e "${RED}未找到外網網卡！${RESET}"
+          sleep 1
+          return 1
+        fi
+        if [ -n "$EXTERNAL_INTERFACE" ]; then
+          iptables -I DOCKER-USER -i $EXTERNAL_INTERFACE -m conntrack --ctorigdstport $host_port -j DROP
+        elif [ -n "$EXTERNAL_INTERFACE6" ]; then
+          ip6tables -I DOCKER-USER -i $EXTERNAL_INTERFACE -m conntrack --ctorigdstport $host_port -j DROP
+        fi
+        if command -v netfilter-persistent >/dev/null 2>&1; then
+          netfilter-persistent save >/dev/null 2>&1
+        elif [ -f "/etc/init.d/iptables" ]; then
+          /etc/init.d/iptables save >/dev/null 2>&1
+          /etc/init.d/ip6tables save >/dev/null 2>&1
+        else
+          service iptables save >/dev/null 2>&1
+          service ip6tables save >/dev/null 2>&1
+        fi
       fi
     fi
     echo "訪問位置："
@@ -1232,7 +1251,8 @@ install_docker_app() {
     ;;
   openlist)
     mkdir /srv/docker/openlist
-    docker run --user $(id -u):$(id -g) -d --restart=always -v /srv/docker/openlist:/opt/openlist/data -p $host_port:5244 -e UMASK=022 --name="openlist" openlistteam/openlist:latest-lite-aria2
+    chown -R 1001:1001 /srv/docker/openlist
+    docker run -d --restart=always -v /srv/docker/openlist:/opt/openlist/data -p $host_port:5244 -e UMASK=022 --name="openlist" openlistteam/openlist:latest-lite-aria2
 		echo "正在讀取密碼"
 		for i in {1..10}; do
       local admin_pass=$(docker logs openlist 2>&1 | grep 'initial password is' | awk '{print $NF}')
@@ -1563,75 +1583,59 @@ uninstall_docker() {
 manage_docker_app() {
   clear
   local app_name="$1"
-  local can_update="false"
+  local can_update=true
   local app_desc=""
   local app_name2=""
-  type=${type:-none}
+  local no_domian=false
+  local type=${2:-none}
 
   case "$app_name" in
   bitwarden)
-    app_name2=$app_name
-    can_update="true"
     app_desc="Bitwarden 是一款輕量級密碼管理工具，支援自行架設並提供瀏覽器擴充。(需要一個域名和你要安裝站點管理器)"
     ;;
   cloudreve)
-    app_name2=$app_name
-    can_update="true"
     app_desc="Cloudreve Cloudreve 是可多用戶的自建雲端硬碟平台，支援外掛儲存與分享連結。（aria2比較不會更新，所以我們這裡提供更新的是cloudreve本體）"
     ;;
   portainer)
-    app_name2=$app_name
-    can_update="true"
-    security="false"
+    no_domian=true
     app_desc="Portainer 提供 Web UI 管理 Docker 容器、映像、網路等功能。【禁止反向代理】"
     ;;
       
   uptime-kuma)
     app_name2="Uptime Kuma"
-    can_update="true"
     app_desc="Uptime Kuma 可監控網站與服務狀態，支援通知與圖表呈現。"
     ;;
   openlist)
-    app_name2=$app_name
-    can_update="true"
     app_desc="openlist 可將 Google Drive、OneDrive 等雲端硬碟掛載為可瀏覽的目錄。"
     ;;
   nextcloud)
     app_name2="Nextcloud"
-    can_update="true"
     app_desc="Nextcloud：自架雲端硬碟，解決個人或團隊檔案同步與分享。支援多用戶權限管理、網頁介面、WebDAV，並可搭配 OnlyOffice 成為完整辦公套件。"
     ;;
   zerotier)
-    app_name2=$app_name
-    can_update="true"
+    no_domian=true
     type=vpn
     app_desc="ZeroTier 可建立虛擬 VPN 網路，支援 NAT 穿透無需開放埠口。"
     ;;
   cloudflared)
     app_name2="Cloudflare tunnel"
-    can_update="true"
-    type=vpn
+    no_domian=true
     app_desc="Cloudflare Tunnel 可將本地伺服器安全地暴露在網路上，無需開放防火牆或設置 DDNS。適合自架面板、Web 服務等使用情境，具備免費 SSL、全自動憑證管理及中轉防護。搭配 Cloudflare 帳號即可快速部署。"
     ;;
   Aria2Ng)
-    app_name2=$app_name
-    can_update="true"
     app_desc="Aria2Ng 是 Aria2 的圖形化網頁管理介面，輕量易用，並會自動部署內建的 Aria2 核心。"
     ;;
   tailscale)
-    app_name2=$app_name
-    can_update="false"
-    type=vpn
+    can_update=false
+    no_domian=true
     app_desc="一款基於 WireGuard 的 VPN 工具，讓多台設備自動安全連網，無需複雜設定，輕鬆打造私人內網。雖非容器應用，但可完美搭配多台 Docker 主機使用，${YELLOW}【屬於純本地安裝的輕量級工具】${RESET}。"
     ;;
   beszel)
     app_name2=Beszel
-    can_update="true"
     app_desc="Beszel 是一款輕量級的伺服器監控平台，提供 Docker 容器統計、歷史數據追蹤和警報功能"
     ;;
   adminer)
     app_name2=adminer
-    can_update="true"
     app_desc="Adminer：支援MySQL/MariaDB、PostgreSQL等多資料庫的輕量管理工具，可透過瀏覽器操作。"
     ;;
   *)
@@ -1642,9 +1646,12 @@ manage_docker_app() {
   if [ $app_name = tailscale ]; then
     local container_exists=$(command -v tailscale)
   else
-    local container_exists=$(docker ps -a --format '{{.Names}}' | grep -w "^$app_name$")
+    local container_exists=$(docker ps -a --format '{{.Names}}' | grep -w "^$app_name")
   fi
-
+  
+  if ! [[ -z "$app_name2" ]]; then
+    app_name2=$app_name
+  fi
   echo -e "${BOLD_CYAN} 管理 Docker 應用：$app_name2${RESET}"
   echo "-----------------------------"
 
@@ -1663,15 +1670,12 @@ manage_docker_app() {
   
   if [ -n "$container_exists" ]; then
     echo -e "${CYAN}訪問地址：${RESET}"
-
-    # 只對需要網路訪問的應用獲取 IP 和 Port
     if ! [ $type = vpn ]; then
       local host_port=$(docker inspect -f '{{range $p, $conf := .NetworkSettings.Ports}}{{if $conf}}{{(index $conf 0).HostPort}}{{end}}{{end}}' "$app_name" 2>/dev/null)
       host_port="${host_port:-未知}"
       local ipv4=$(curl -s --connect-timeout 3 https://api4.ipify.org)
       local ipv6=$(curl -s -6 --connect-timeout 3 https://api6.ipify.org)
 
-      # 使用 if/elif/else 結構來處理不同情況
       if [ "$app_name" == "portainer" ]; then
         [ -n "$ipv4" ] && echo -e "IPv4：${BLUE}https://${ipv4}:${host_port}${RESET}"
         [ -n "$ipv6" ] && echo -e "IPv6：${BLUE}https://[${ipv6}]:${host_port}${RESET}"
@@ -1692,7 +1696,7 @@ manage_docker_app() {
   else
     [[ "$can_update" == "true" ]] && echo "2. 更新"
     echo "3. 移除"
-    if [ ! $type = vpn ] || $security; then
+    if ! $no_domian; then
       echo "4. 配置域名訪問"
       echo "5. 移除現有的域名訪問"
     fi
@@ -1702,7 +1706,42 @@ manage_docker_app() {
 
   echo -n -e "${YELLOW}請輸入欲執行的選項：${RESET}"
   read choice
-
+  
+  if $no_domian; then
+    case $choice in
+    4)
+      check_site
+      read -p "請輸入域名:" domain
+      site setup $domain proxy 127.0.0.1 http $host_port || {
+        echo "站點搭建失敗"
+        return 1
+      }
+      if [ $app_name == nextcloud ]; then
+        local count=$(docker exec -u www-data nextcloud php occ config:system:get trusted_domains | wc -l)
+        docker exec -u www-data nextcloud php occ config:system:set trusted_domains $count --value="$domain"
+      fi
+      echo -e "${GREEN}站點搭建完成，網址：$domain${RESET}"
+      read -p "操作完成，按任意鍵繼續" -n1
+      ;;
+    5)
+      check_site
+      if select_domain_from_proxy $host_port; then
+        site del $SELECTED_DOMAIN || {
+          echo "站點刪除失敗"
+          return 1
+        }
+      fi
+      if [ $app_name == nextcloud ]; then
+        echo "請進入/srv/docker/nextcloud/config/config.php"
+        echo "將trusted_domains您的域名$SELECTED_DOMAIN刪除並陣列索引連續"
+        read -p "請按任意鍵修改..." -n1
+        nano /srv/docker/nextcloud/config/config.php
+      fi
+      echo -e "${GREEN}站點刪除完成${RESET}"
+      read -p "操作完成，按任意鍵繼續" -n1
+      ;;
+    esac
+  fi
   case "$choice" in
   1)
     if [ -n "$container_exists" ]; then
@@ -1728,37 +1767,6 @@ manage_docker_app() {
       return
     fi
     uninstall_docker_app "$app_name"
-    ;;
-  4)
-    check_site
-    read -p "請輸入域名:" domain
-    site setup $domain proxy 127.0.0.1 http $host_port || {
-      echo "站點搭建失敗"
-      return 1
-    }
-    if [ $app_name == nextcloud ]; then
-      local count=$(docker exec -u www-data nextcloud php occ config:system:get trusted_domains | wc -l)
-      docker exec -u www-data nextcloud php occ config:system:set trusted_domains $count --value="$domain"
-    fi
-    echo -e "${GREEN}站點搭建完成，網址：$domain${RESET}"
-    read -p "操作完成，按任意鍵繼續" -n1
-    ;;
-  5)
-    check_site
-    if select_domain_from_proxy $host_port; then
-      site del $SELECTED_DOMAIN || {
-        echo "站點刪除失敗"
-        return 1
-      }
-    fi
-    if [ $app_name == nextcloud ]; then
-      echo "請進入/srv/docker/nextcloud/config/config.php"
-      echo "將trusted_domains您的域名$SELECTED_DOMAIN刪除並陣列索引連續"
-      read -p "請按任意鍵修改..." -n1
-      nano /srv/docker/nextcloud/config/config.php
-    fi
-    echo -e "${GREEN}站點刪除完成${RESET}"
-    read -p "操作完成，按任意鍵繼續" -n1
     ;;
   0)
     return
@@ -2401,13 +2409,13 @@ menu_docker_app(){
       manage_docker_app nextcloud
       ;;
     10)
-      manage_docker_app zerotier
+      manage_docker_app zerotier vpn
       ;;
     11)
-      manage_docker_app cloudflared
+      manage_docker_app cloudflared vpn
       ;;
     12)
-      manage_docker_app tailscale
+      manage_docker_app tailscale vpn
       ;;
     0)
       break
@@ -2665,7 +2673,29 @@ while true; do
     read -p "操作完成，請按任意鍵繼續..." -n1 
     ;;
   13)
-    bash <(curl -sSL https://linuxmirrors.cn/docker.sh) --only-registry
+    echo "1. 中國大陸版"
+    echo "2. 國際版"
+    read -p "請選擇" choice1
+    case $choice1 in
+    1)
+      bash <(curl -sSL https://linuxmirrors.cn/docker.sh) --only-registry
+      ;;
+    2)
+      mkdir -p /etc/docker
+      local daemon_json="/etc/docker/daemon.json"
+      local gcr_mirror="https://mirror.gcr.io"
+      if [ ! -f "$daemon_json" ] || [ ! -s "$daemon_json" ]; then
+        echo "{\"registry-mirrors\": [\"$gcr_mirror\"]}" > "$daemon_json"
+      else
+        tmp_json=$(mktemp)
+        jq ". + { \"registry-mirrors\": ((.[\"registry-mirrors\"] // []) + [\"$gcr_mirror\"] | unique) }" "$daemon_json" > "$tmp_json" && mv -f "$tmp_json" "$daemon_json"
+      fi
+      # 設置權限
+      chmod 644 "$daemon_json"
+      # 重啟服務
+      service docker restart
+    ;;
+    esac
     read -p "操作完成，請按任意鍵繼續..." -n1
     ;;
   14)
