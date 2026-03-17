@@ -11,7 +11,7 @@ GRAY="\033[0;90m"
 RESET="\033[0m"
 
 #版本
-version="2.9.8"
+version="2.9.9"
 
 #變量
 CURRENT_PAGE=1
@@ -619,7 +619,9 @@ docker_show_logs() {
 
   if [[ "$follow" == "y" || "$follow" == "yes" ]]; then
     echo -e "${YELLOW} 持續監聽 $cname 日誌中（按 Ctrl+C 結束）...${RESET}"
+    trap '' INT
     docker logs -f "$cname"
+    trap - INT
   else
     read -p "請輸入要顯示最後幾行日誌（預設 100）：" line_count
     line_count=${line_count:-100}
@@ -1908,13 +1910,29 @@ show_docker_containers() {
         p="${p#"${p%%[![:space:]]*}"}" # trim
         
         if [[ "$p" == *"->"* ]]; then
-          local ip_ext="${p%%->*}"; local int_proto="${p##*->}"
-          local ext_port="${ip_ext##*:}"; local int_port="${int_proto%%/*}"; local proto="${int_proto##*/}"
+          # 有外部映射
+          local ip_ext="${p%%->*}"
+          local int_proto="${p##*->}"
+
+          local ext_port="${ip_ext##*:}"
+          local int_port="${int_proto%%/*}"
+          local proto="${int_proto##*/}"
+
           local port_key="${ext_port}:${int_port}:${proto}"
+
           if [[ -z "${seen_ports[$port_key]}" ]]; then
             render_rows+=("$name|$status_zh|$ext_port|$int_port|$proto|$restart_zh")
-          seen_ports["$port_key"]=1 # 標記為已處理
-                has_port=true
+            seen_ports["$port_key"]=1
+            has_port=true
+          fi
+        elif [[ "$p" == */* ]]; then
+          local int_port="${p%%/*}"
+          local proto="${p##*/}"
+          local port_key="internal:${int_port}:${proto}"
+          if [[ -z "${seen_ports[$port_key]}" ]]; then
+            render_rows+=("$name|$status_zh|-|$int_port|$proto|$restart_zh")
+            seen_ports["$port_key"]=1
+              has_port=true
           fi
         fi
       done
