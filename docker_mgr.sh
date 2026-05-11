@@ -11,7 +11,7 @@ GRAY="\033[0;90m"
 RESET="\033[0m"
 
 #版本
-version="2.9.9"
+version="3.0.0"
 
 #變量
 CURRENT_PAGE=1
@@ -33,59 +33,6 @@ check_dba(){
   fi
 }
 
-configure_redis_with_firewall_interface() {
-  local iface="$(ip route | grep default | grep -o 'dev [^ ]*' | cut -d' ' -f2)"
-  local conf="/etc/redis/redis.conf"
-
-  echo "[INFO] 檢查 Redis 是否已監聽所有介面..."
-
-  if ss -lntp | grep -qE 'LISTEN.*(0\.0\.0\.0|\[::\]):6379'; then
-    echo "[SKIP] Redis 已監聽所有介面，無需修改 bind。"
-    return 0
-  else
-    echo "[INFO] Redis 未監聽所有介面，開始修改 redis.conf..."
-
-    cp "$conf" "$conf.bak.$(date +%s)"
-    sed -i 's/^bind .*/bind * -::*/' "$conf"
-
-    service redis restart
-    sleep 1
-
-    if ss -lntp | grep -qE 'LISTEN.*(0\.0\.0\.0|\[::\]):6379'; then
-      echo "[OK] Redis 已成功監聽所有介面。"
-    else
-      echo "[ERR] Redis 重啟後仍未正確監聽，請手動檢查。"
-      return 1
-    fi
-  fi
-
-  echo "[INFO] 使用 redis-cli 關閉 protected-mode..."
-
-  redis-cli CONFIG SET protected-mode no
-  redis-cli CONFIG REWRITE
-
-  echo "[INFO] 設定防火牆：封鎖 interface $iface 的 Redis 外部連線..."
-
-  iptables -C INPUT -i "$iface" -p tcp --dport 6379 -j DROP 2>/dev/null || \
-  iptables -A INPUT -i "$iface" -p tcp --dport 6379 -j DROP
-
-  ip6tables -C INPUT -i "$iface" -p tcp --dport 6379 -j DROP 2>/dev/null || \
-  ip6tables -A INPUT -i "$iface" -p tcp --dport 6379 -j DROP
-
-  if systemctl is-active firewalld &>/dev/null; then
-    echo "[INFO] 偵測到 firewalld，加入封鎖 rich rule..."
-    firewall-cmd --permanent --add-rich-rule="rule interface name=\"$iface\" port port=\"6379\" protocol=\"tcp\" reject"
-    firewall-cmd --reload
-  fi
-
-  if command -v ufw &>/dev/null && ufw status | grep -q 'Status: active'; then
-    echo "[INFO] 偵測到 UFW，插入 deny in on $iface..."
-    ufw deny in on "$iface" to any port 6379 proto tcp
-  fi
-
-  echo "[DONE] Redis 防火牆限制完成。"
-  sheep 3
-}
 
 #檢查系統版本
 check_system(){
@@ -1274,19 +1221,10 @@ install_docker_app() {
     ;;
   cloudreve)
     mkdir -p /srv/docker/cloudreve
-    cd /srv/docker/cloudreve
-    mkdir {avatar,uploads}
-    touch {conf.ini,cloudreve.db}
-    docker run -d \
-      --name cloudreve \
-      --restart always \
-      -p $host_port:5212 \
-      -v /srv/downloads:/data \
-      -v /srv/docker/cloudreve/uploads:/cloudreve/uploads \
-      -v /srv/docker/cloudreve/conf.ini:/cloudreve/conf.ini \
-      -v /srv/docker/cloudreve/cloudreve.db:/cloudreve/cloudreve.db \
-      -v /srv/docker/cloudreve/avatar:/cloudreve/avatar \
-      cloudreve/cloudreve:latest
+    docker run -d --name cloudreve \
+    -p $host_port:5212 \
+    -v /srv/docker/cloudreve:/cloudreve/data \
+    cloudreve/cloudreve:latest
     echo "===== cloudreve資訊 ====="
     echo "訪問位置："
     ips $host_port
@@ -1351,53 +1289,11 @@ install_docker_app() {
     ;;
     nextcloud)
       mkdir -p /srv/docker/nextcloud
-      if ! command -v mysql >/dev/null 2>&1; then
-        if ! command -v redis-server >/dev/null 2>&1; then
-          docker run -d --name nextcloud \
-            -p $host_port:80 \
-            --restart always \
-            -v /srv/docker/nextcloud:/var/www/html \
-            --add-host=host.docker.internal:host-gateway
-            nextcloud:stable
-        else
-          docker run -d --name nextcloud \
-            -p $host_port:80 \
-            --restart always \
-            -v /srv/docker/nextcloud:/var/www/html \
-            -e REDIS_HOST=host.docker.internal \
-            --add-host=host.docker.internal:host-gateway \
-            nextcloud:stable
-           configure_redis_with_firewall_interface
-        fi
-      else
-        check_dba
-        local db_pass=$(dba mysql add nextcloud ncuser --force)
-        if command -v redis-server >/dev/null 2>&1; then
-          docker run -d --name nextcloud \
-            -p $host_port:80 \
-            --restart always \
-            -v /srv/docker/nextcloud:/var/www/html \
-            -e MYSQL_HOST=host.docker.internal \
-            -e MYSQL_DATABASE=nextcloud \
-            -e MYSQL_USER=ncuser \
-            -e MYSQL_PASSWORD=$db_pass \
-            -e REDIS_HOST=host.docker.internal \
-            --add-host=host.docker.internal:host-gateway \
-            nextcloud:stable
-            configure_redis_with_firewall_interface
-        else
-          docker run -d --name nextcloud \
-            -p $host_port:80 \
-            --restart always \
-            -v /srv/docker/nextcloud:/var/www/html \
-            -e MYSQL_HOST=host.docker.internal \
-            -e MYSQL_DATABASE=nextcloud \
-            -e MYSQL_USER=ncuser \
-            -e MYSQL_PASSWORD=$db_pass \
-            --add-host=host.docker.internal:host-gateway \
-            nextcloud:stable
-        fi
-      fi
+      docker run -d --name nextcloud \
+        -p $host_port:80 \
+        --restart always \
+        -v /srv/docker/nextcloud:/var/www/html \
+        nextcloud:stable
       echo "===== Nextcloud資訊 ====="
       echo "訪問位置："
       ips $host_port
@@ -1507,23 +1403,19 @@ install_docker_and_compose() {
       exit 1
     fi
   fi
-
-  # 啟用與開機自啟
-  if [ "$system" -eq 1 ] || [ "$system" -eq 2 ]; then
-    systemctl is-enabled docker &>/dev/null || systemctl enable docker
-
-    # 如果沒在跑才啟動
-    if ! systemctl is-active docker &>/dev/null; then
-      systemctl start docker
-      sleep 2.5
+  if [ -d /run/systemd/system ]; then
+    # systemd
+    if ! ls /etc/systemd/system/*.wants/docker.service >/dev/null 2>&1; then
+      systemctl enable docker
     fi
-  elif [ "$system" -eq 3 ]; then
-    if ! rc-update show | grep -q docker; then
+  else
+    # OpenRC
+    if ! [ -e /etc/runlevels/default/docker ]; then
       rc-update add docker default
     fi
-    if ! service docker status | grep -q running; then
-      service docker start  && sleep 2.5
-    fi
+  fi
+  if ! pgrep -x dockerd >/dev/null; then
+    service docker start
   fi
 }
 uninstall_docker() {
@@ -1842,167 +1734,283 @@ restart_docker_container() {
 }
 
 show_docker_containers() {
-  local target_page="$1"
-  [ -z "$target_page" ] && target_page=1
-  
-  D_GREEN='\033[0;32m'
+  local target_page="${1:-1}"
+  local SEP=$'\u001F'
 
-  if ! command -v docker &>/dev/null; then echo -e "${RED}Docker 未安裝或未運行。${RESET}"; return 1; fi
+  D_GREEN='\u001B[0;32m'
+
+  if ! command -v curl >/dev/null 2>&1 || ! command -v jq >/dev/null 2>&1; then
+    echo -e "${RED}此函數需要 curl 與 jq，請先安裝。${RESET}"
+    return 1
+  fi
+
+  if [ ! -S /var/run/docker.sock ]; then
+    echo -e "${RED}找不到 /var/run/docker.sock，Docker 可能未運行或無權限。${RESET}"
+    return 1
+  fi
+
+  _DW=0
+  _PADDED=""
 
   display_width() {
-    local str="$1"; local width=0; local i=0; local len=${#str}
-    while [ $i -lt $len ]; do
-      local char="${str:$i:1}"
-      if [[ $(printf "%d" "'$char") -gt 127 ]] 2>/dev/null; then width=$((width + 2)); else width=$((width + 1)); fi
-      i=$((i + 1))
+    local str="$1" i ch ord
+    _DW=0
+    for ((i=0; i<${#str}; i++)); do
+      ch="${str:i:1}"
+      LC_CTYPE=C printf -v ord '%d' "'$ch" 2>/dev/null || ord=63
+      (( ord > 127 )) && ((_DW += 2)) || ((_DW += 1))
     done
-    echo $width
-  }
-  pad_str() {
-    local text="$1"; local max="$2"; local align="$3"
-    local w; w=$(display_width "$text")
-    local pad=$((max - w)); [[ $pad -lt 0 ]] && pad=0
-    local spaces; printf -v spaces "%*s" $pad ""
-    if [[ "$align" == "right" ]]; then echo "${spaces}${text}"; else echo "${text}${spaces}"; fi
   }
 
-  # --- 資料獲取 ---
-  declare -A restart_map
-  local all_ids=$(docker ps -a -q)
-  
-  if [ -z "$all_ids" ]; then 
+  pad_str() {
+    local text="$1" max="$2" align="$3" pad
+    display_width "$text"
+    pad=$((max - _DW))
+    (( pad < 0 )) && pad=0
+
+    if [[ "$align" == "right" ]]; then
+      printf -v _PADDED "%*s%s" "$pad" "" "$text"
+    else
+      printf -v _PADDED "%s%*s" "$text" "$pad" ""
+    fi
+  }
+
+  local json_data
+  json_data=$(curl -s --unix-socket /var/run/docker.sock \
+    'http://localhost/containers/json?all=true')
+
+  if [[ -z "$json_data" || "$json_data" == "[]" ]]; then
     echo -e "${YELLOW}沒有任何容器存在。${RESET}"
     TOTAL_PAGES=1
     return 0
   fi
 
-  while IFS='|' read -r id policy; do 
-      restart_map["$id"]="$policy"
-  done < <(docker inspect --format '{{printf "%.12s" .Id}}|{{.HostConfig.RestartPolicy.Name}}' $all_ids 2>/dev/null)
+  declare -A restart_map
+  local -a full_ids=()
+  mapfile -t full_ids < <(jq -r '.[].Id' <<< "$json_data")
 
-  local -a render_rows=() 
-  local raw_ps_output=$(docker ps -a --format "{{.ID}}§{{.Names}}§{{.State}}§{{.Ports}}")
+  if ((${#full_ids[@]} > 0)); then
+    while IFS='|' read -r short_id policy; do
+      restart_map["$short_id"]="$policy"
+    done < <(
+      docker inspect \
+        --format '{{printf "%.12s" .Id}}|{{.HostConfig.RestartPolicy.Name}}' \
+        "${full_ids[@]}" 2>/dev/null
+    )
+  fi
 
-  # --- 解析迴圈 (修正去重邏輯) ---
-  while IFS='§' read -r id name status ports_raw; do
-    local status_zh
-    case "$status" in 
-      "running") status_zh="${D_GREEN}運行中${RESET}";; "exited") status_zh="${GRAY}已停止${RESET}";; 
-      "paused") status_zh="${YELLOW}已暫停${RESET}";; "created") status_zh="${BLUE}已建立${RESET}";; 
-      *) status_zh="$status";; 
+  local raw_ps_output
+  raw_ps_output=$(jq -r '
+    .[] |
+    .Id[0:12] as $id |
+    (.Names[0] | ltrimstr("/")) as $name |
+    .State as $state |
+    (
+      if (.Ports | type) == "array" and (.Ports | length) > 0 then
+        [
+          .Ports[] |
+          if has("PublicPort") then
+            (
+              (if (.IP // "") != "" then (.IP + ":") else "" end) +
+              (.PublicPort | tostring) +
+              "->" +
+              (.PrivatePort | tostring) +
+              "/" +
+              (.Type | tostring)
+            )
+          else
+            (
+              (.PrivatePort | tostring) +
+              "/" +
+              (.Type | tostring)
+            )
+          end
+        ] | join(",")
+      else
+        ""
+      end
+    ) as $ports |
+    [$id, $name, $state, $ports] | @tsv
+  ' <<< "$json_data")
+
+  local -a render_rows=()
+
+  local id name status ports_raw
+  while IFS=$'\t' read -r id name status ports_raw; do
+    [[ -z "$id" ]] && continue
+
+    local status_zh status_clean
+    case "$status" in
+      running) status_zh="${D_GREEN}運行中${RESET}"; status_clean="運行中" ;;
+      exited)  status_zh="${GRAY}已停止${RESET}";    status_clean="已停止" ;;
+      paused)  status_zh="${YELLOW}已暫停${RESET}";  status_clean="已暫停" ;;
+      created) status_zh="${BLUE}已建立${RESET}";    status_clean="已建立" ;;
+      *)       status_zh="$status";                  status_clean="$status" ;;
     esac
-    
-    local policy_raw="${restart_map["$id"]}"
+
+    local policy_raw="${restart_map[$id]}"
     local restart_zh
-    case "$policy_raw" in 
-      "no") restart_zh="不重啟";; "always") restart_zh="永遠重啟";; 
-      "on-failure") restart_zh="錯誤時重啟";; "unless-stopped") restart_zh="除手動停止外";; 
-      *) restart_zh="${policy_raw:- -}";; 
+    case "$policy_raw" in
+      no)             restart_zh="不重啟" ;;
+      always)         restart_zh="永遠重啟" ;;
+      on-failure)     restart_zh="錯誤時重啟" ;;
+      unless-stopped) restart_zh="除手動停止外" ;;
+      *)              restart_zh="${policy_raw:--}" ;;
     esac
 
     local has_port=false
-    # [關鍵修改 1] 宣告一個臨時關聯陣列，用來記錄這個容器已經處理過哪些端口組合
-    declare -A seen_ports 
+    unset seen_ports
+    declare -A seen_ports=()
 
     if [[ -n "$ports_raw" ]]; then
-      IFS=',' read -ra PORT_ARR <<< "$ports_raw"
+      local -a PORT_ARR
+      local p ip_ext int_proto ext_port int_port proto port_key
+      IFS=',' read -r -a PORT_ARR <<< "$ports_raw"
+
       for p in "${PORT_ARR[@]}"; do
-        p="${p#"${p%%[![:space:]]*}"}" # trim
-        
+        p="${p#"${p%%[![:space:]]*}"}"
+        p="${p%"${p##*[![:space:]]}"}"
+
         if [[ "$p" == *"->"* ]]; then
-          # 有外部映射
-          local ip_ext="${p%%->*}"
-          local int_proto="${p##*->}"
+          ip_ext="${p%%->*}"
+          int_proto="${p##*->}"
 
-          local ext_port="${ip_ext##*:}"
-          local int_port="${int_proto%%/*}"
-          local proto="${int_proto##*/}"
+          ext_port="${ip_ext##*:}"
+          int_port="${int_proto%%/*}"
+          proto="${int_proto##*/}"
 
-          local port_key="${ext_port}:${int_port}:${proto}"
-
+          port_key="${ext_port}:${int_port}:${proto}"
           if [[ -z "${seen_ports[$port_key]}" ]]; then
-            render_rows+=("$name|$status_zh|$ext_port|$int_port|$proto|$restart_zh")
+            render_rows+=("${name}${SEP}${status_zh}${SEP}${status_clean}${SEP}${ext_port}${SEP}${int_port}${SEP}${proto}${SEP}${restart_zh}")
             seen_ports["$port_key"]=1
             has_port=true
           fi
         elif [[ "$p" == */* ]]; then
-          local int_port="${p%%/*}"
-          local proto="${p##*/}"
-          local port_key="internal:${int_port}:${proto}"
+          int_port="${p%%/*}"
+          proto="${p##*/}"
+
+          port_key="internal:${int_port}:${proto}"
           if [[ -z "${seen_ports[$port_key]}" ]]; then
-            render_rows+=("$name|$status_zh|-|$int_port|$proto|$restart_zh")
+            render_rows+=("${name}${SEP}${status_zh}${SEP}${status_clean}${SEP}-${SEP}${int_port}${SEP}${proto}${SEP}${restart_zh}")
             seen_ports["$port_key"]=1
-              has_port=true
+            has_port=true
           fi
         fi
       done
     fi
-    unset seen_ports
 
-    if [ "$has_port" = false ]; then render_rows+=("$name|$status_zh|-|-|-|$restart_zh"); fi
+    if [[ "$has_port" == false ]]; then
+      render_rows+=("${name}${SEP}${status_zh}${SEP}${status_clean}${SEP}-${SEP}-${SEP}-${SEP}${restart_zh}")
+    fi
   done <<< "$raw_ps_output"
 
-  # --- 分頁計算 ---
   local total_rows=${#render_rows[@]}
   local page_size=10
   TOTAL_PAGES=$(( (total_rows + page_size - 1) / page_size ))
-  [[ $TOTAL_PAGES -eq 0 ]] && TOTAL_PAGES=1
-  
-  if [ "$target_page" -gt "$TOTAL_PAGES" ]; then target_page=$TOTAL_PAGES; fi
-  if [ "$target_page" -lt 1 ]; then target_page=1; fi
-  CURRENT_PAGE=$target_page 
+  (( TOTAL_PAGES == 0 )) && TOTAL_PAGES=1
 
-  # --- 渲染準備 ---
+  (( target_page > TOTAL_PAGES )) && target_page=$TOTAL_PAGES
+  (( target_page < 1 )) && target_page=1
+  CURRENT_PAGE=$target_page
+
   local start_index=$(( (target_page - 1) * page_size ))
   local end_index=$(( start_index + page_size - 1 ))
-  if [ $end_index -ge $total_rows ]; then end_index=$(( total_rows - 1 )); fi
+  (( end_index >= total_rows )) && end_index=$(( total_rows - 1 ))
 
   local headers=("容器名" "狀態" "外埠" "內埠" "協議" "重啟策略")
   local -a col_widths=(0 0 0 0 0 0)
-  for i in "${!headers[@]}"; do col_widths[$i]=$(display_width "${headers[$i]}"); done
+  local i
+  for i in "${!headers[@]}"; do
+    display_width "${headers[$i]}"
+    col_widths[$i]=$_DW
+  done
 
   local -a page_data=()
-  for ((i=start_index; i<=end_index; i++)); do page_data+=("${render_rows[$i]}"); done
-
-  local last_name_check=""
-  local -a display_rows=()
-  for row_str in "${page_data[@]}"; do
-      IFS='|' read -r n s e i p r <<< "$row_str"
-      local d_n="$n"; local d_s="$s"; local d_r="$r"
-      if [[ "$n" == "$last_name_check" ]]; then d_n=""; d_s=""; d_r=""; else last_name_check="$n"; fi
-      
-      local clean_s=$(echo -e "$d_s" | sed "s/\x1B\[[0-9;]*[a-zA-Z]//g")
-      [ $(display_width "$d_n") -gt ${col_widths[0]} ] && col_widths[0]=$(display_width "$d_n")
-      [ $(display_width "$clean_s") -gt ${col_widths[1]} ] && col_widths[1]=$(display_width "$clean_s")
-      [ $(display_width "$e") -gt ${col_widths[2]} ] && col_widths[2]=$(display_width "$e")
-      [ $(display_width "$i") -gt ${col_widths[3]} ] && col_widths[3]=$(display_width "$i")
-      [ $(display_width "$p") -gt ${col_widths[4]} ] && col_widths[4]=$(display_width "$p")
-      [ $(display_width "$d_r") -gt ${col_widths[5]} ] && col_widths[5]=$(display_width "$d_r")
-      display_rows+=("$d_n|$d_s|$e|$i|$p|$d_r")
+  for ((i=start_index; i<=end_index; i++)); do
+    page_data+=("${render_rows[$i]}")
   done
 
-  # --- 實際輸出 ---
-  local header_line=""
+  local last_name=""
+  local -a display_rows=()
+
+  local row_str n s s_clean e inner p r
+  for row_str in "${page_data[@]}"; do
+    IFS="$SEP" read -r n s s_clean e inner p r <<< "$row_str"
+
+    if [[ -n "$last_name" && "$n" != "$last_name" ]]; then
+      display_rows+=("__SEP__")
+    fi
+
+    local d_n="$n" d_s="$s" d_sc="$s_clean" d_r="$r"
+
+    if [[ "$n" == "$last_name" ]]; then
+      d_n=""
+      d_s=""
+      d_sc=""
+      d_r=""
+    else
+      last_name="$n"
+    fi
+
+    display_width "$d_n";  (( _DW > col_widths[0] )) && col_widths[0]=$_DW
+    display_width "$d_sc"; (( _DW > col_widths[1] )) && col_widths[1]=$_DW
+    display_width "$e";    (( _DW > col_widths[2] )) && col_widths[2]=$_DW
+    display_width "$inner";(( _DW > col_widths[3] )) && col_widths[3]=$_DW
+    display_width "$p";    (( _DW > col_widths[4] )) && col_widths[4]=$_DW
+    display_width "$d_r";  (( _DW > col_widths[5] )) && col_widths[5]=$_DW
+
+    display_rows+=("${d_n}${SEP}${d_s}${SEP}${d_sc}${SEP}${e}${SEP}${inner}${SEP}${p}${SEP}${d_r}")
+  done
+
+  local header_line="" idx align
   for idx in "${!headers[@]}"; do
-      local align="left"; [[ "${headers[$idx]}" == *"埠"* ]] && align="right"
-      header_line+=$(pad_str "${headers[$idx]}" "${col_widths[$idx]}" "$align")
-      [[ $idx -lt 5 ]] && header_line+=" | "
+    align="left"
+    [[ "${headers[$idx]}" == *"埠"* ]] && align="right"
+    pad_str "${headers[$idx]}" "${col_widths[$idx]}" "$align"
+    header_line+="$_PADDED"
+    (( idx < 5 )) && header_line+=" | "
   done
   echo -e "${BLUE}${header_line}${RESET}"
-  
+
+  local total_w=$(( col_widths[0] + col_widths[1] + col_widths[2] + col_widths[3] + col_widths[4] + col_widths[5] + 15 ))
+  local sep_line
+  printf -v sep_line '%*s' "$total_w" ''
+  sep_line="${sep_line// /-}"
+
+  local line sp s_pad
   for row_str in "${display_rows[@]}"; do
-      IFS='|' read -r n s e i p r <<< "$row_str"
-      local line=""
-      line+=$(pad_str "$n" "${col_widths[0]}" "left") && line+=" | "
-      local clean_s=$(echo -e "$s" | sed "s/\x1B\[[0-9;]*[a-zA-Z]//g")
-      local s_pad=$(( ${col_widths[1]} - $(display_width "$clean_s") ))
-      line+="${s}"; printf -v sp "%*s" $s_pad ""; line+="$sp | "
-      line+=$(pad_str "$e" "${col_widths[2]}" "right") && line+=" | "
-      line+=$(pad_str "$i" "${col_widths[3]}" "right") && line+=" | "
-      line+=$(pad_str "$p" "${col_widths[4]}" "left") && line+=" | "
-      line+=$(pad_str "$r" "${col_widths[5]}" "left")
-      echo -e "$line"
+    if [[ "$row_str" == "__SEP__" ]]; then
+      echo -e "${GRAY}${sep_line}${RESET}"
+      continue
+    fi
+
+    IFS="$SEP" read -r n s s_clean e inner p r <<< "$row_str"
+    line=""
+
+    pad_str "$n" "${col_widths[0]}" "left"
+    line+="$_PADDED | "
+
+    display_width "$s_clean"
+    s_pad=$(( col_widths[1] - _DW ))
+    (( s_pad < 0 )) && s_pad=0
+    printf -v sp '%*s' "$s_pad" ''
+    line+="${s}${sp} | "
+
+    pad_str "$e" "${col_widths[2]}" "right"
+    line+="$_PADDED | "
+
+    pad_str "$inner" "${col_widths[3]}" "right"
+    line+="$_PADDED | "
+
+    pad_str "$p" "${col_widths[4]}" "left"
+    line+="$_PADDED | "
+
+    pad_str "$r" "${col_widths[5]}" "left"
+    line+="$_PADDED"
+
+    echo -e "$line"
   done
+
   echo -e "${GRAY}頁碼: $CURRENT_PAGE / $TOTAL_PAGES${RESET}"
 }
 
@@ -2311,7 +2319,7 @@ update_docker_container() {
     local user=$(docker inspect -f '{{.Config.User}}' "$container_name")
     local user_arg=""
     if [[ -n "$user" ]]; then
-        user_arg="--user=$user"
+        user_arg="--user $user"
     fi
 
     docker stop "$container_name"
